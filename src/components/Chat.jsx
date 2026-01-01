@@ -106,6 +106,9 @@ export default function Chat({ user, onBack }) {
             } }
           >
             <strong>{m.from}:</strong> <p style={ { color: 'inherit', margin: 0, display: 'inline' } }>{m.text}</p>
+            <div style={ { fontSize: '0.7rem', opacity: 0.7, marginTop: '4px', textAlign: 'right' } }>
+              {new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </div>
           </div>
         ))}
       </div>

@@ -1,3 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+
 :root {
   --bg: #0f1115;
   --card: #1a1d24;
@@ -16,7 +18,7 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, "Inter", sans-serif;
+  font-family: Inter, system-ui, -apple-system, sans-serif;
 }
 
 h1, h2, h3 {

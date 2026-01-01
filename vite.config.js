@@ -25,6 +25,7 @@ let consent = {}; // { userId: "open" | "later" | "no" }
 let messages = {}; // { userId: [{ from, text, ts }] }
 let reports = []; // { from, against, reason, ts }
 let blocks = {};  // { userId: [blockedUserId] }
+let stats = { onboarded: 0, chatsOpened: 0 };
 
 function isCompatible(u1, u2) {
   if (!u1 || !u2) return false;
@@ -149,6 +150,20 @@ function apiPlugin() {
             res.end(JSON.stringify(messages[userId] || []));
             return;
           }
+        }
+
+        const statsMatch = req.url.match(/^\/api\/stats\/(.+)$/);
+        if (statsMatch && req.method === 'POST') {
+          const key = statsMatch[1];
+          if (stats.hasOwnProperty(key)) {
+            stats[key]++;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+          } else {
+            res.statusCode = 400;
+            res.end('Invalid stats key');
+          }
+          return;
         }
 
         next();

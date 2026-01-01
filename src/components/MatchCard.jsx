@@ -27,6 +27,7 @@ export default function MatchCard({ user }) {
     setAsked(false);
     if (newChoice === "open") {
       setOpenChat(true);
+      fetch("/api/stats/chatsOpened", { method: "POST" });
     }
   };
 

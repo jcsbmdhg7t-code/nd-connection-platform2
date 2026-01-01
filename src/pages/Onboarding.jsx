@@ -29,6 +29,7 @@ export default function Onboarding({ onDone }) {
       },
       body: JSON.stringify(form)
     });
+    fetch("/api/stats/onboarded", { method: "POST" });
     onDone();
   };
 

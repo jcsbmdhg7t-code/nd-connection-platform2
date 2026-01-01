@@ -116,6 +116,9 @@ export default function Onboarding({ onDone }) {
           </label>
 
           <button className="button" onClick={save}>Afronden</button>
+          <div style={ { marginTop: '12px', textAlign: 'center' } }>
+            <small>Je kunt dit later altijd aanpassen.</small>
+          </div>
         </>
       )}
     </div>

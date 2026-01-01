@@ -3,6 +3,7 @@ import MatchCard from "../components/MatchCard";
 
 export default function Home() {
   const [matches, setMatches] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -10,8 +11,17 @@ export default function Home() {
       headers: { "x-token": token }
     })
       .then(r => r.json())
-      .then(setMatches);
+      .then(d => {
+        setMatches(d);
+        setLoading(false);
+      });
   }, []);
+
+  if (loading) return (
+    <div className="container" style={ { display: 'flex', justifyContent: 'center', alignItems: 'center', height: '80vh' } }>
+      <p>Even verbinden…</p>
+    </div>
+  );
 
   return (
     <div className="container">

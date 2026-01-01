@@ -6,13 +6,41 @@ export default function MatchCard({ user }) {
   const [asked, setAsked] = useState(false);
   const [choice, setChoice] = useState(null);
   const [openChat, setOpenChat] = useState(false);
+  const [reporting, setReporting] = useState(false);
 
   useEffect(() => {
-    fetch(`/api/consent/${user.id}`)
+    const token = localStorage.getItem("token");
+    fetch(`/api/consent/${user.id}`, {
+      headers: { "x-token": token }
+    })
       .then(r => r.json())
       .then(data => setChoice(data.choice))
       .catch(err => console.error("Error fetching consent:", err));
   }, [user.id]);
+
+  const report = async () => {
+    const reason = prompt("Waarom wil je deze gebruiker rapporteren?");
+    if (!reason) return;
+    
+    const token = localStorage.getItem("token");
+    const meRes = await fetch("/api/me", { headers: { "x-token": token } });
+    const me = await meRes.json();
+    
+    await fetch("/api/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-token": token },
+      body: JSON.stringify({ from: me.id, against: user.id, reason })
+    });
+    
+    await fetch(`/api/block/${me.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-token": token },
+      body: JSON.stringify({ target: user.id })
+    });
+    
+    alert("Gebruiker gerapporteerd en geblokkeerd.");
+    window.location.reload();
+  };
 
   const handleConsent = (newChoice) => {
     setChoice(newChoice);
@@ -41,7 +69,7 @@ export default function MatchCard({ user }) {
         Waarom voorgesteld: vergelijkbaar tempo en communicatie.
       </p>
 
-      <div style={ { marginTop: 12 } }>
+      <div style={ { marginTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }>
         {choice === "open" ? (
           <div>
             <p style={ { color: "var(--accent)", fontWeight: "bold", marginBottom: "8px" } }>
@@ -58,6 +86,20 @@ export default function MatchCard({ user }) {
             {choice === "later" ? "Nu wel open staan" : "Sta open voor contact"}
           </button>
         )}
+        
+        <button 
+          onClick={report}
+          style={ { 
+            background: 'transparent', 
+            border: 'none', 
+            color: 'var(--muted)', 
+            cursor: 'pointer',
+            fontSize: '0.8rem',
+            textDecoration: 'underline'
+          } }
+        >
+          Rapporteer
+        </button>
       </div>
     </div>
   );

@@ -23,6 +23,8 @@ const users = [
 
 let consent = {}; // { userId: "open" | "later" | "no" }
 let messages = {}; // { userId: [{ from, text, ts }] }
+let reports = []; // { from, against, reason, ts }
+let blocks = {};  // { userId: [blockedUserId] }
 
 function isCompatible(u1, u2) {
   if (!u1 || !u2) return false;
@@ -32,7 +34,8 @@ function isCompatible(u1, u2) {
 }
 
 function getMatchesForCurrentUser(me, allUsers) {
-  return allUsers.filter(u => u.id !== me.id && isCompatible(me, u));
+  const userBlocks = blocks[me.id] || [];
+  return allUsers.filter(u => u.id !== me.id && !userBlocks.includes(u.id) && isCompatible(me, u));
 }
 
 function apiPlugin() {
@@ -89,6 +92,26 @@ function apiPlugin() {
             res.statusCode = 401;
             res.end('Unauthorized');
           }
+          return;
+        }
+
+        // Safety routes
+        if (req.url === '/api/report' && req.method === 'POST') {
+          const { from, against, reason } = req.body;
+          reports.push({ from, against, reason, ts: Date.now() });
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        const blockMatch = req.url.match(/^\/api\/block\/(.+)$/);
+        if (blockMatch && req.method === 'POST') {
+          const userId = blockMatch[1];
+          const { target } = req.body;
+          blocks[userId] = blocks[userId] || [];
+          blocks[userId].push(target);
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
           return;
         }
 

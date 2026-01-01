@@ -6,8 +6,11 @@ export default function Chat({ user, onBack }) {
   const [assist, setAssist] = useState(false);
 
   useEffect(() => {
+    const token = localStorage.getItem("token");
     const fetchMessages = () => {
-      fetch(`/api/chat/${user.id}`)
+      fetch(`/api/chat/${user.id}`, {
+        headers: { "x-token": token }
+      })
         .then(r => r.json())
         .then(setList)
         .catch(err => console.error("Error fetching messages:", err));
@@ -18,10 +21,36 @@ export default function Chat({ user, onBack }) {
     return () => clearInterval(interval);
   }, [user.id]);
 
+  const report = async () => {
+    const reason = prompt("Waarom wil je deze gebruiker rapporteren?");
+    if (!reason) return;
+    
+    const token = localStorage.getItem("token");
+    const meRes = await fetch("/api/me", { headers: { "x-token": token } });
+    const me = await meRes.json();
+    
+    await fetch("/api/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-token": token },
+      body: JSON.stringify({ from: me.id, against: user.id, reason })
+    });
+    
+    await fetch(`/api/block/${me.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-token": token },
+      body: JSON.stringify({ target: user.id })
+    });
+    
+    alert("Gebruiker gerapporteerd en geblokkeerd.");
+    onBack();
+    window.location.reload();
+  };
+
   const send = async (e) => {
     if (e) e.preventDefault();
     if (!text.trim()) return;
 
+    const token = localStorage.getItem("token");
     const msg = assist
       ? `Ik merk dat ik me zo voel: ${text}. Mijn behoefte is duidelijkheid.`
       : text;
@@ -29,12 +58,14 @@ export default function Chat({ user, onBack }) {
     try {
       await fetch(`/api/chat/${user.id}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-token": token },
         body: JSON.stringify({ from: "me", text: msg })
       });
       setText("");
       // Refresh messages immediately
-      const r = await fetch(`/api/chat/${user.id}`);
+      const r = await fetch(`/api/chat/${user.id}`, {
+        headers: { "x-token": token }
+      });
       const data = await r.json();
       setList(data);
     } catch (err) {
@@ -44,11 +75,26 @@ export default function Chat({ user, onBack }) {
 
   return (
     <div className="container" style={ { display: 'flex', flexDirection: 'column', height: '90vh' } }>
-      <div style={ { display: 'flex', alignItems: 'center', marginBottom: '16px' } }>
-        <button className="button secondary" style={ { width: 'auto', padding: '8px 16px' } } onClick={onBack}>
-          ← Terug
+      <div style={ { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' } }>
+        <div style={ { display: 'flex', alignItems: 'center' } }>
+          <button className="button secondary" style={ { width: 'auto', padding: '8px 16px' } } onClick={onBack}>
+            ← Terug
+          </button>
+          <h2 style={ { margin: '0 0 0 16px' } }>{user.name}</h2>
+        </div>
+        <button 
+          onClick={report}
+          style={ { 
+            background: 'transparent', 
+            border: 'none', 
+            color: 'var(--muted)', 
+            cursor: 'pointer',
+            fontSize: '0.8rem',
+            textDecoration: 'underline'
+          } }
+        >
+          Rapporteer
         </button>
-        <h2 style={ { margin: '0 0 0 16px' } }>{user.name}</h2>
       </div>
 
       <div style={ { flex: 1, overflowY: 'auto', marginBottom: '16px' } }>

@@ -49,24 +49,32 @@ export default function Onboarding({ onDone }) {
       {step === 2 && (
         <>
           <h2>Energie & prikkels</h2>
+          <p>Dit helpt ons het tempo en de hoeveelheid contact af te stemmen. Alles is optioneel.</p>
+
           <select
             value={form.energyLevel}
             onChange={e => setForm({ ...form, energyLevel: e.target.value })}
             className="card"
             style={ { width: '100%', marginBottom: '12px' } }
           >
-            <option value="">Kies energietempo</option>
-            <option value="laag">Rustig</option>
-            <option value="neutraal">Neutraal</option>
-            <option value="hoog">Actief</option>
+            <option value="">Hoe voelt sociaal contact meestal?</option>
+            <option value="laag">🌱 Rustig</option>
+            <option value="wisselend">🔄 Wisselend</option>
+            <option value="hoog">🔥 Actief</option>
           </select>
 
-          {["geluid", "drukte", "veel berichten"].map(p => (
+          <p>Wat kan soms te veel zijn?</p>
+
+          {[
+            "Veel geluid",
+            "Drukke omgevingen",
+            "Veel berichten tegelijk"
+          ].map(p => (
             <label key={p} className="card" style={ { display: 'block', cursor: 'pointer' } }>
               <input
                 type="checkbox"
-                checked={form.sensoryTriggers.includes(p)}
-                onChange={() => toggle("sensoryTriggers", p)}
+                checked={form.sensoryTriggers.includes(p.toLowerCase())}
+                onChange={() => toggle("sensoryTriggers", p.toLowerCase())}
               /> {p}
             </label>
           ))}

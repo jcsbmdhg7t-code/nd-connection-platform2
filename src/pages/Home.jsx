@@ -29,7 +29,10 @@ export default function Home() {
       <p>Rustige voorstellen op basis van afstemming, niet swipen.</p>
 
       {matches.length === 0 && (
-        <p>Er zijn nu even geen nieuwe voorstellen.</p>
+        <div className="card">
+          <p>Er zijn nu geen nieuwe voorstellen.</p>
+          <p>Kom later terug of pas je voorkeuren aan.</p>
+        </div>
       )}
 
       {matches.map(m => (

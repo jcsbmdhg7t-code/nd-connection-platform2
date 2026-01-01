@@ -5,7 +5,10 @@ export default function Home() {
   const [matches, setMatches] = useState([]);
 
   useEffect(() => {
-    fetch("/matches")
+    const token = localStorage.getItem("nd_token");
+    fetch("/matches", {
+      headers: { "x-token": token }
+    })
       .then(r => r.json())
       .then(setMatches);
   }, []);

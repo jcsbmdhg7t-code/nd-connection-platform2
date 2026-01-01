@@ -8,15 +8,33 @@ export default function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch("/api/me")
-      .then(r => r.json())
-      .then(me => {
-        if (me.intentions && me.intentions.length) {
+    const initAuth = async () => {
+      let token = localStorage.getItem("nd_token");
+      
+      if (!token) {
+        const res = await fetch("/api/auth/anon", { method: "POST" });
+        const data = await res.json();
+        token = data.token;
+        localStorage.setItem("nd_token", token);
+      }
+
+      try {
+        const res = await fetch("/api/me", {
+          headers: { "x-token": token }
+        });
+        const me = await res.json();
+        
+        if (me && me.intentions && me.intentions.length) {
           setReady(true);
         }
+      } catch (err) {
+        console.error("Auth error:", err);
+      } finally {
         setLoading(false);
-      })
-      .catch(() => setLoading(false));
+      }
+    };
+
+    initAuth();
   }, []);
 
   if (loading) return <div className="container"><p>Laden...</p></div>;

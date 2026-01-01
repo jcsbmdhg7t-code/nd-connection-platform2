@@ -20,9 +20,13 @@ export default function Onboarding({ onDone }) {
   };
 
   const save = async () => {
+    const token = localStorage.getItem("nd_token");
     await fetch("/api/me", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { 
+        "Content-Type": "application/json",
+        "x-token": token
+      },
       body: JSON.stringify(form)
     });
     onDone();

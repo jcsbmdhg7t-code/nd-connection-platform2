@@ -57,15 +57,17 @@ export default function Onboarding({ onDone }) {
           <p>Dit helpt ons het tempo en de hoeveelheid contact af te stemmen. Alles is optioneel.</p>
 
           <select
-            value={form.energyLevel}
+            value={form.energyLevel || ""}
             onChange={e => setForm({ ...form, energyLevel: e.target.value })}
             className="card"
             style={ { width: '100%', marginBottom: '12px' } }
           >
-            <option value="">Hoe voelt sociaal contact meestal?</option>
-            <option value="laag">🌱 Rustig</option>
-            <option value="wisselend">🔄 Wisselend</option>
-            <option value="hoog">🔥 Actief</option>
+            <option value="" disabled>
+              Hoe voelt sociaal contact meestal voor jou?
+            </option>
+            <option value="rustig">Rustig</option>
+            <option value="wisselend">Wisselend</option>
+            <option value="actief">Actief</option>
           </select>
 
           <p>Wat kan soms te veel zijn?</p>

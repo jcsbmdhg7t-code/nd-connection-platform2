@@ -1,16 +1,28 @@
+import { useEffect, useState } from "react";
+import MatchCard from "../components/MatchCard";
+
 export default function Home() {
+  const [matches, setMatches] = useState([]);
+
+  useEffect(() => {
+    fetch("/api/matches")
+      .then(r => r.json())
+      .then(setMatches)
+      .catch(err => console.error("Error fetching matches:", err));
+  }, []);
+
   return (
     <div className="container">
-      <div className="card">
-        <h1>Home Page</h1>
-        <p>Welcome to your React MVP app.</p>
-      </div>
-      <div className="card">
-        <h3>Quick Actions</h3>
-        <button className="button">Primary Action</button>
-        <div style={ { height: '12px' } }></div>
-        <button className="button secondary">Secondary Action</button>
-      </div>
+      <h2>Voor jou voorgesteld</h2>
+      <p>Rustige voorstellen op basis van afstemming, niet swipen.</p>
+
+      {matches.length === 0 && (
+        <p>Er zijn nu even geen nieuwe voorstellen.</p>
+      )}
+
+      {matches.map(m => (
+        <MatchCard key={m.id} user={m} />
+      ))}
     </div>
   );
 }

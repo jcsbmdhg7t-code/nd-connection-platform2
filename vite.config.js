@@ -33,9 +33,9 @@ function isCompatible(u1, u2) {
   return sameEnergy || overlappingIntentions;
 }
 
-function getMatchesForCurrentUser(me, allUsers) {
-  const userBlocks = blocks[me.id] || [];
-  return allUsers.filter(u => u.id !== me.id && !userBlocks.includes(u.id) && isCompatible(me, u));
+function getMatchesForCurrentUser(currentUser, allUsers, blocks = {}) {
+  const userBlocks = blocks[currentUser.id] || [];
+  return allUsers.filter(u => u.id !== currentUser.id && !userBlocks.includes(u.id) && isCompatible(currentUser, u));
 }
 
 function apiPlugin() {
@@ -85,7 +85,7 @@ function apiPlugin() {
         if (req.url === '/matches' && req.method === 'GET') {
           const currentUser = usersByToken[token];
           if (currentUser) {
-            const matches = getMatchesForCurrentUser(currentUser, users);
+            const matches = getMatchesForCurrentUser(currentUser, users, blocks);
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(matches));
           } else {

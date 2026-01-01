@@ -1,8 +1,31 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import ConsentModal from "./ConsentModal";
+import Chat from "./Chat";
 
 export default function MatchCard({ user }) {
   const [asked, setAsked] = useState(false);
+  const [choice, setChoice] = useState(null);
+  const [showChat, setShowChat] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/consent/${user.id}`)
+      .then(r => r.json())
+      .then(data => setChoice(data.choice))
+      .catch(err => console.error("Error fetching consent:", err));
+  }, [user.id]);
+
+  const handleConsent = (newChoice) => {
+    setChoice(newChoice);
+    setAsked(false);
+  };
+
+  if (showChat) {
+    return <Chat user={user} onBack={() => setShowChat(false)} />;
+  }
+
+  if (choice === "no") {
+    return null;
+  }
 
   return (
     <div className="card">
@@ -15,13 +38,24 @@ export default function MatchCard({ user }) {
         Waarom voorgesteld: vergelijkbaar tempo en communicatie.
       </p>
 
-      {!asked ? (
-        <button className="button" onClick={() => setAsked(true)}>
-          Sta open voor contact
-        </button>
-      ) : (
-        <ConsentModal user={user} onDone={() => setAsked(false)} />
-      )}
+      <div style={ { marginTop: 12 } }>
+        {choice === "open" ? (
+          <div>
+            <p style={ { color: "var(--accent)", fontWeight: "bold", marginBottom: "8px" } }>
+              ✓ Je staat open voor contact.
+            </p>
+            <button className="button" onClick={() => setShowChat(true)}>
+              Open Chat
+            </button>
+          </div>
+        ) : asked ? (
+          <ConsentModal user={user} onDone={handleConsent} />
+        ) : (
+          <button className="button" onClick={() => setAsked(true)}>
+            {choice === "later" ? "Nu wel open staan" : "Sta open voor contact"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

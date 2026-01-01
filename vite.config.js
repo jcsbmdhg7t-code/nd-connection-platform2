@@ -30,6 +30,7 @@ const users = [
 ];
 
 let consent = {}; // { userId: "open" | "later" | "no" }
+let messages = {}; // { userId: [{ from, text, ts }] }
 
 function isCompatible(u1, u2) {
   const sameEnergy = u1.energyLevel === u2.energyLevel;
@@ -81,6 +82,25 @@ function apiPlugin() {
           if (req.method === 'GET') {
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ choice: consent[userId] || null }));
+            return;
+          }
+        }
+
+        // Chat routes
+        const chatMatch = req.url.match(/^\/api\/chat\/(.+)$/);
+        if (chatMatch) {
+          const userId = chatMatch[1];
+          if (req.method === 'POST') {
+            const { from, text } = req.body;
+            messages[userId] = messages[userId] || [];
+            messages[userId].push({ from, text, ts: Date.now() });
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'GET') {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(messages[userId] || []));
             return;
           }
         }

@@ -5,7 +5,7 @@ import Chat from "./Chat";
 export default function MatchCard({ user }) {
   const [asked, setAsked] = useState(false);
   const [choice, setChoice] = useState(null);
-  const [showChat, setShowChat] = useState(false);
+  const [openChat, setOpenChat] = useState(false);
 
   useEffect(() => {
     fetch(`/api/consent/${user.id}`)
@@ -17,10 +17,13 @@ export default function MatchCard({ user }) {
   const handleConsent = (newChoice) => {
     setChoice(newChoice);
     setAsked(false);
+    if (newChoice === "open") {
+      setOpenChat(true);
+    }
   };
 
-  if (showChat) {
-    return <Chat user={user} onBack={() => setShowChat(false)} />;
+  if (openChat) {
+    return <Chat user={user} onBack={() => setOpenChat(false)} />;
   }
 
   if (choice === "no") {
@@ -44,7 +47,7 @@ export default function MatchCard({ user }) {
             <p style={ { color: "var(--accent)", fontWeight: "bold", marginBottom: "8px" } }>
               ✓ Je staat open voor contact.
             </p>
-            <button className="button" onClick={() => setShowChat(true)}>
+            <button className="button" onClick={() => setOpenChat(true)}>
               Open Chat
             </button>
           </div>

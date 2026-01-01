@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import Moderation from "./Moderation";
 
 export default function Chat({ user, onBack }) {
   const [list, setList] = useState([]);
@@ -46,6 +47,11 @@ export default function Chat({ user, onBack }) {
     window.location.reload();
   };
 
+  const handleAction = () => {
+    onBack();
+    window.location.reload();
+  };
+
   const send = async (e) => {
     if (e) e.preventDefault();
     if (!text.trim()) return;
@@ -82,19 +88,6 @@ export default function Chat({ user, onBack }) {
           </button>
           <h2 style={ { margin: '0 0 0 16px' } }>{user.name}</h2>
         </div>
-        <button 
-          onClick={report}
-          style={ { 
-            background: 'transparent', 
-            border: 'none', 
-            color: 'var(--muted)', 
-            cursor: 'pointer',
-            fontSize: '0.8rem',
-            textDecoration: 'underline'
-          } }
-        >
-          Rapporteer
-        </button>
       </div>
 
       <div style={ { flex: 1, overflowY: 'auto', marginBottom: '16px' } }>
@@ -135,6 +128,8 @@ export default function Chat({ user, onBack }) {
         />
         <button className="button" style={ { width: 'auto' } } type="submit">Verstuur</button>
       </form>
+      
+      <Moderation user={user} onAction={handleAction} />
     </div>
   );
 }

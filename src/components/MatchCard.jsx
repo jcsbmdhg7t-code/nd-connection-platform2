@@ -1,12 +1,12 @@
 import { useState, useEffect } from "react";
 import ConsentModal from "./ConsentModal";
 import Chat from "./Chat";
+import Moderation from "./Moderation";
 
 export default function MatchCard({ user }) {
   const [asked, setAsked] = useState(false);
   const [choice, setChoice] = useState(null);
   const [openChat, setOpenChat] = useState(false);
-  const [reporting, setReporting] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem("token");
@@ -18,27 +18,7 @@ export default function MatchCard({ user }) {
       .catch(err => console.error("Error fetching consent:", err));
   }, [user.id]);
 
-  const report = async () => {
-    const reason = prompt("Waarom wil je deze gebruiker rapporteren?");
-    if (!reason) return;
-    
-    const token = localStorage.getItem("token");
-    const meRes = await fetch("/api/me", { headers: { "x-token": token } });
-    const me = await meRes.json();
-    
-    await fetch("/api/report", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-token": token },
-      body: JSON.stringify({ from: me.id, against: user.id, reason })
-    });
-    
-    await fetch(`/api/block/${me.id}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-token": token },
-      body: JSON.stringify({ target: user.id })
-    });
-    
-    alert("Gebruiker gerapporteerd en geblokkeerd.");
+  const handleAction = () => {
     window.location.reload();
   };
 
@@ -86,21 +66,9 @@ export default function MatchCard({ user }) {
             {choice === "later" ? "Nu wel open staan" : "Sta open voor contact"}
           </button>
         )}
-        
-        <button 
-          onClick={report}
-          style={ { 
-            background: 'transparent', 
-            border: 'none', 
-            color: 'var(--muted)', 
-            cursor: 'pointer',
-            fontSize: '0.8rem',
-            textDecoration: 'underline'
-          } }
-        >
-          Rapporteer
-        </button>
       </div>
+      
+      <Moderation user={user} onAction={handleAction} />
     </div>
   );
 }

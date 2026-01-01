@@ -29,6 +29,8 @@ const users = [
   }
 ];
 
+let consent = {}; // { userId: "open" | "later" | "no" }
+
 function isCompatible(u1, u2) {
   const sameEnergy = u1.energyLevel === u2.energyLevel;
   const overlappingIntentions = u1.intentions.some(i => u2.intentions.includes(i));
@@ -45,24 +47,44 @@ function apiPlugin() {
     configureServer(server) {
       server.middlewares.use(require('body-parser').json());
       server.middlewares.use((req, res, next) => {
+        // Current user routes
         if (req.url === '/api/me' && req.method === 'GET') {
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(currentUser));
           return;
         }
         if (req.url === '/api/me' && req.method === 'POST') {
-          let body = req.body;
-          currentUser = { ...currentUser, ...body };
+          currentUser = { ...currentUser, ...req.body };
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ ok: true, currentUser }));
           return;
         }
+
+        // Matches routes
         if (req.url === '/matches' && req.method === 'GET') {
           const matches = getMatchesForCurrentUser(currentUser, users);
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(matches));
           return;
         }
+
+        // Consent routes
+        const consentMatch = req.url.match(/^\/api\/consent\/(.+)$/);
+        if (consentMatch) {
+          const userId = consentMatch[1];
+          if (req.method === 'POST') {
+            consent[userId] = req.body.choice;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          if (req.method === 'GET') {
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ choice: consent[userId] || null }));
+            return;
+          }
+        }
+
         next();
       });
     }

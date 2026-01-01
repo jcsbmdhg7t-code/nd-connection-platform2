@@ -1,28 +1,64 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-function mockApiPlugin() {
+// Simulated backend state
+let currentUser = {
+  id: "me",
+  name: "Jij",
+  intentions: [],
+  energyLevel: null,
+  communication: null,
+  sensoryTriggers: [],
+  wantsNvcHelp: false
+};
+
+const users = [
+  {
+    id: 1,
+    name: "Alex",
+    intentions: ["vriendschap", "diepe gesprekken"],
+    communication: "direct",
+    energyLevel: "laag"
+  },
+  {
+    id: 2,
+    name: "Sam",
+    intentions: ["romantisch", "community"],
+    communication: "reflectief",
+    energyLevel: "neutraal"
+  }
+];
+
+function isCompatible(u1, u2) {
+  const sameEnergy = u1.energyLevel === u2.energyLevel;
+  const overlappingIntentions = u1.intentions.some(i => u2.intentions.includes(i));
+  return sameEnergy || overlappingIntentions;
+}
+
+function getMatchesForCurrentUser(me, allUsers) {
+  return allUsers.filter(u => u.id !== me.id && isCompatible(me, u));
+}
+
+function apiPlugin() {
   return {
-    name: 'mock-api',
+    name: 'api-simulator',
     configureServer(server) {
+      server.middlewares.use(require('body-parser').json());
       server.middlewares.use((req, res, next) => {
-        if (req.url === '/api/matches') {
-          const matches = [
-            {
-              id: 1,
-              name: "Alex",
-              intentions: ["Vriendschap", "Diepe gesprekken"],
-              communication: "Direct en open",
-              energyLevel: "Rustig / Introvert"
-            },
-            {
-              id: 2,
-              name: "Sam",
-              intentions: ["Lange termijn", "Samen groeien"],
-              communication: "Reflectief",
-              energyLevel: "Gebalanceerd"
-            }
-          ];
+        if (req.url === '/api/me' && req.method === 'GET') {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(currentUser));
+          return;
+        }
+        if (req.url === '/api/me' && req.method === 'POST') {
+          let body = req.body;
+          currentUser = { ...currentUser, ...body };
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true, currentUser }));
+          return;
+        }
+        if (req.url === '/api/matches' && req.method === 'GET') {
+          const matches = getMatchesForCurrentUser(currentUser, users);
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(matches));
           return;
@@ -34,7 +70,7 @@ function mockApiPlugin() {
 }
 
 export default defineConfig({
-  plugins: [react(), mockApiPlugin()],
+  plugins: [react(), apiPlugin()],
   server: {
     host: '0.0.0.0',
     port: 5000,

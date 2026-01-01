@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
+import ConsentModal from "./ConsentModal";
 
 export default function MatchCard({ user }) {
   const [choice, setChoice] = useState(null);
+  const [showModal, setShowModal] = useState(false);
 
   useEffect(() => {
     fetch(`/api/consent/${user.id}`)
@@ -10,18 +12,18 @@ export default function MatchCard({ user }) {
       .catch(err => console.error("Error fetching consent:", err));
   }, [user.id]);
 
-  const handleChoice = async (newChoice) => {
-    try {
-      await fetch(`/api/consent/${user.id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ choice: newChoice })
-      });
-      setChoice(newChoice);
-    } catch (err) {
-      console.error("Error saving consent:", err);
-    }
+  const handleChoice = (newChoice) => {
+    setChoice(newChoice);
+    setShowModal(false);
   };
+
+  if (showModal) {
+    return <ConsentModal user={user} onDone={handleChoice} />;
+  }
+
+  if (choice === "no") {
+    return null;
+  }
 
   return (
     <div className="card">
@@ -45,22 +47,14 @@ export default function MatchCard({ user }) {
             <p style={ { color: "var(--muted)", marginBottom: "8px" } }>
               Je bekijkt dit voorstel later.
             </p>
-            <button className="button" onClick={() => handleChoice("open")}>
+            <button className="button" onClick={() => setShowModal(true)}>
               Nu wel open staan
             </button>
           </div>
-        ) : choice === "no" ? (
-          <p style={ { color: "var(--muted)" } }>Voorstel verborgen.</p>
         ) : (
-          <>
-            <button className="button" onClick={() => handleChoice("open")}>
-              Sta open voor contact
-            </button>
-            <div style={ { height: 8 } } />
-            <button className="button secondary" onClick={() => handleChoice("later")}>
-              Nu niet
-            </button>
-          </>
+          <button className="button" onClick={() => setShowModal(true)}>
+            Bekijk voorstel
+          </button>
         )}
       </div>
     </div>

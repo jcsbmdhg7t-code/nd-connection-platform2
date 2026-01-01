@@ -5,7 +5,7 @@ export default function Home() {
   const [matches, setMatches] = useState([]);
 
   useEffect(() => {
-    const token = localStorage.getItem("nd_token");
+    const token = localStorage.getItem("token");
     fetch("/matches", {
       headers: { "x-token": token }
     })

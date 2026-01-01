@@ -9,13 +9,13 @@ export default function App() {
 
   useEffect(() => {
     const initAuth = async () => {
-      let token = localStorage.getItem("nd_token");
+      let token = localStorage.getItem("token");
       
       if (!token) {
         const res = await fetch("/api/auth/anon", { method: "POST" });
         const data = await res.json();
         token = data.token;
-        localStorage.setItem("nd_token", token);
+        localStorage.setItem("token", token);
       }
 
       try {

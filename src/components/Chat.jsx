@@ -1,14 +1,15 @@
 import { useState, useEffect } from "react";
 
 export default function Chat({ user, onBack }) {
-  const [messages, setMessages] = useState([]);
+  const [list, setList] = useState([]);
   const [text, setText] = useState("");
+  const [assist, setAssist] = useState(false);
 
   useEffect(() => {
     const fetchMessages = () => {
       fetch(`/api/chat/${user.id}`)
         .then(r => r.json())
-        .then(setMessages)
+        .then(setList)
         .catch(err => console.error("Error fetching messages:", err));
     };
 
@@ -18,20 +19,24 @@ export default function Chat({ user, onBack }) {
   }, [user.id]);
 
   const send = async (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (!text.trim()) return;
+
+    const msg = assist
+      ? `Ik merk dat ik me zo voel: ${text}. Mijn behoefte is duidelijkheid.`
+      : text;
 
     try {
       await fetch(`/api/chat/${user.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: "me", text })
+        body: JSON.stringify({ from: "me", text: msg })
       });
       setText("");
       // Refresh messages immediately
       const r = await fetch(`/api/chat/${user.id}`);
       const data = await r.json();
-      setMessages(data);
+      setList(data);
     } catch (err) {
       console.error("Error sending message:", err);
     }
@@ -47,10 +52,10 @@ export default function Chat({ user, onBack }) {
       </div>
 
       <div style={ { flex: 1, overflowY: 'auto', marginBottom: '16px' } }>
-        {messages.length === 0 && (
+        {list.length === 0 && (
           <p style={ { textAlign: 'center', color: 'var(--muted)' } }>Begin het gesprek...</p>
         )}
-        {messages.map((m, i) => (
+        {list.map((m, i) => (
           <div 
             key={i} 
             className="card" 
@@ -61,19 +66,26 @@ export default function Chat({ user, onBack }) {
               color: m.from === "me" ? "#0b0e14" : "var(--text)"
             } }
           >
-            <p style={ { color: 'inherit', margin: 0 } }>{m.text}</p>
+            <strong>{m.from}:</strong> <p style={ { color: 'inherit', margin: 0, display: 'inline' } }>{m.text}</p>
           </div>
         ))}
       </div>
 
+      <div style={ { marginBottom: '12px' } }>
+        <label className="card" style={ { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '10px' } }>
+          <input type="checkbox" checked={assist} onChange={() => setAssist(!assist)} />
+          Help me dit verbindend formuleren
+        </label>
+      </div>
+
       <form onSubmit={send} style={ { display: 'flex', gap: '8px' } }>
-        <input 
-          type="text" 
-          value={text} 
-          onChange={e => setText(e.target.value)} 
-          className="card" 
-          style={ { flex: 1, marginBottom: 0 } } 
-          placeholder="Typ een bericht..."
+        <textarea
+          className="card"
+          rows={2}
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder="Typ je bericht…"
+          style={ { flex: 1, marginBottom: 0, resize: 'none' } }
         />
         <button className="button" style={ { width: 'auto' } } type="submit">Verstuur</button>
       </form>

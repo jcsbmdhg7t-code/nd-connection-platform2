@@ -57,7 +57,7 @@ function apiPlugin() {
           res.end(JSON.stringify({ ok: true, currentUser }));
           return;
         }
-        if (req.url === '/api/matches' && req.method === 'GET') {
+        if (req.url === '/matches' && req.method === 'GET') {
           const matches = getMatchesForCurrentUser(currentUser, users);
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify(matches));

@@ -5,10 +5,9 @@ export default function Home() {
   const [matches, setMatches] = useState([]);
 
   useEffect(() => {
-    fetch("/api/matches")
+    fetch("/matches")
       .then(r => r.json())
-      .then(setMatches)
-      .catch(err => console.error("Error fetching matches:", err));
+      .then(setMatches);
   }, []);
 
   return (

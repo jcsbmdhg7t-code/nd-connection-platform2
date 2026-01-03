@@ -1,0 +1,143 @@
+const express = require("express");
+const app = express();
+const PORT = 5000;
+
+app.get("/", (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ND Connection</title>
+
+<style>
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+    background: #0f172a;
+    color: #e5e7eb;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+  }
+
+  .screen {
+    display: none;
+    background: #020617;
+    padding: 32px;
+    border-radius: 16px;
+    width: 420px;
+  }
+
+  .screen.active {
+    display: block;
+  }
+
+  h1 {
+    margin-top: 0;
+    margin-bottom: 16px;
+  }
+
+  button {
+    width: 100%;
+    padding: 14px;
+    margin-top: 16px;
+    border: none;
+    border-radius: 12px;
+    font-size: 16px;
+    cursor: pointer;
+    background: #3b82f6;
+    color: white;
+  }
+
+  button.green {
+    background: #22c55e;
+  }
+
+  textarea {
+    width: 100%;
+    height: 80px;
+    border-radius: 8px;
+    border: none;
+    padding: 10px;
+    font-size: 14px;
+  }
+</style>
+</head>
+
+<body>
+
+<!-- SCHERM 1 -->
+<div class="screen active" id="s1">
+  <h1>Energie & prikkels</h1>
+
+  <label>Energietempo</label><br/>
+  <select id="energie">
+    <option>Rustig</option>
+    <option>Gemiddeld</option>
+    <option>Hoog</option>
+  </select><br/><br/>
+
+  <label><input type="checkbox" value="Veel geluid"> Veel geluid</label><br/>
+  <label><input type="checkbox" value="Drukke omgevingen"> Drukke omgevingen</label>
+
+  <button onclick="nextToS2()">Verder</button>
+</div>
+
+<!-- SCHERM 2 -->
+<div class="screen" id="s2">
+  <h1>Communicatie</h1>
+  <p>Wat helpt voor jou?</p>
+  <textarea id="communicatie"></textarea>
+
+  <button class="green" onclick="nextToS3()">Opslaan</button>
+</div>
+
+<!-- SCHERM 3 -->
+<div class="screen" id="s3">
+  <h1>Welkom</h1>
+  <p>Je onboarding is afgerond.</p>
+
+  <button>Matches bekijken</button>
+  <button>Community</button>
+  <button>Mijn profiel</button>
+</div>
+
+<script>
+  const state = {
+    energie: null,
+    prikkels: [],
+    communicatie: ""
+  };
+
+  function show(id) {
+    document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+    document.getElementById(id).classList.add("active");
+  }
+
+  function nextToS2() {
+    state.energie = document.getElementById("energie").value;
+    state.prikkels = [];
+    document.querySelectorAll('#s1 input[type="checkbox"]').forEach(cb => {
+      if (cb.checked) state.prikkels.push(cb.value);
+    });
+    show("s2");
+  }
+
+  function nextToS3() {
+    state.communicatie = document.getElementById("communicatie").value;
+    console.log("STATE:", state);
+    show("s3");
+  }
+</script>
+
+</body>
+</html>
+  `);
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("Server draait op http://0.0.0.0:" + PORT);
+});

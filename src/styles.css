@@ -1,0 +1,84 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+
+:root {
+  --bg: #0f1115;
+  --card: #1a1d24;
+  --text: #f2f2f2;
+  --muted: #d6d6d6;
+  --accent: #7aa2ff;
+  --border: #2a2f3a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.container {
+  width: 100%;
+  max-width: 420px;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+h2 {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+p {
+  font-size: 16px;
+  color: #cfd3da;
+  line-height: 1.5;
+  margin: 0 0 8px 0;
+}
+
+small {
+  font-size: 14px;
+  color: #9aa1ad;
+}
+
+.card {
+  background: #1a1d24;
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+}
+
+select, textarea, input[type="checkbox"], input[type="radio"] {
+  accent-color: #7aa2ff;
+}
+
+.button {
+  background: #7aa2ff;
+  color: #0f1115;
+  font-size: 16px;
+  font-weight: 500;
+  border-radius: 12px;
+  padding: 12px;
+  width: 100%;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.button:hover {
+  opacity: 0.9;
+}
+
+.button.secondary {
+  background: #2a2f3a;
+  color: #f2f2f2;
+}

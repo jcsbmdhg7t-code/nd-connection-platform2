@@ -1,0 +1,66 @@
+{
+  "users": [
+    {
+      "energie": "Rustig",
+      "prikkels": [
+        "Veel geluid",
+        "Drukke omgevingen",
+        "Veel berichten tegelijk"
+      ],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [
+        "Drukke omgevingen"
+      ],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    },
+    {
+      "energie": "Laag",
+      "prikkels": [],
+      "communicatie": ""
+    }
+  ],
+  "profile": {
+    "energie": "Gemiddeld",
+    "prikkels": "",
+    "communicatie": ""
+  },
+  "onboarded": true
+}

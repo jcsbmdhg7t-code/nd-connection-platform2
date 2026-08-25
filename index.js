@@ -3,6 +3,7 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const crypto = require("crypto");
+const rateLimit = require("express-rate-limit");
 const db = require("./db");
 
 const app = express();
@@ -10,10 +11,36 @@ const server = http.createServer(app);
 const io = new Server(server);
 const PORT = process.env.PORT || 5000;
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50kb" }));
+app.use(express.urlencoded({ extended: true, limit: "50kb" }));
+
+/* ---- RATE LIMITING ---- */
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Te veel verzoeken, probeer het over een minuutje opnieuw." },
+});
+app.use("/api/", apiLimiter);
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Te veel accounts aangemaakt vanaf dit adres, probeer het later opnieuw." },
+});
 
 function genId() { return crypto.randomBytes(6).toString("hex"); }
+function roomIdFor(a, b) { return [a, b].sort().join("_"); }
+
+const ENERGIE_OPTIONS = ["laag", "gemiddeld", "hoog"];
+
+function cleanString(value, maxLength) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, maxLength);
+}
 
 function matchScore(a, b) {
   let score = 0;
@@ -26,8 +53,10 @@ function matchScore(a, b) {
 function getMatches(userId) {
   const me = db.getUser(userId);
   if (!me) return [];
+  // Geen ruwe account-ID's van anderen teruggeven — dat is sinds de herstelcode-login
+  // hun volledige accounttoegang. Een roomId is voldoende om te kunnen chatten.
   return db.getOtherUsers(userId)
-    .map((u) => ({ id: u.id, alias: u.alias, energie: u.energie, score: matchScore(me, u) }))
+    .map((u) => ({ roomId: roomIdFor(userId, u.id), alias: u.alias, energie: u.energie, score: matchScore(me, u) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
 }
@@ -42,15 +71,20 @@ function nvcCheck(text) {
 }
 
 /* ---- API ROUTES ---- */
-app.post("/api/register", (req, res) => {
+app.post("/api/register", registerLimiter, (req, res) => {
   const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
+
+  if (energie !== undefined && !ENERGIE_OPTIONS.includes(energie)) {
+    return res.status(400).json({ error: "Ongeldige waarde voor energie" });
+  }
+
   const id = genId();
   const user = db.createUser(id, {
-    alias: alias || "Anoniem",
+    alias: cleanString(alias, 40) || "Anoniem",
     energie,
     geluid: geluid === "true",
     drukte: drukte === "true",
-    communicatie,
+    communicatie: cleanString(communicatie, 1000),
     openVoorRomantiek: openVoorRomantiek === "true",
   });
   res.json({ id, alias: user.alias });
@@ -72,6 +106,8 @@ app.get("/api/messages/:roomId", (req, res) => {
 });
 
 app.post("/api/report", (req, res) => {
+  const payload = JSON.stringify(req.body || {});
+  if (payload.length > 5000) return res.status(400).json({ error: "Melding is te lang" });
   db.addReport(req.body);
   res.json({ ok: true });
 });
@@ -82,10 +118,10 @@ app.get("/api/community", (req, res) => {
 
 app.post("/api/community", (req, res) => {
   const { alias, text } = req.body;
-  const trimmed = (text || "").trim();
-  if (!trimmed) return res.status(400).json({ error: "text is verplicht" });
+  const trimmed = cleanString(text, 500);
+  if (!trimmed) return res.status(400).json({ error: "text is verplicht (max 500 tekens)" });
   const time = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
-  db.addCommunityPost(alias || "Anoniem", trimmed, time);
+  db.addCommunityPost(cleanString(alias, 40) || "Anoniem", trimmed, time);
   res.json({ ok: true });
 });
 
@@ -110,7 +146,20 @@ app.post("/api/quiz/answer", (req, res) => {
   if (!userId || questionId === undefined || choiceIndex === undefined) {
     return res.status(400).json({ error: "userId, questionId en choiceIndex zijn verplicht" });
   }
-  db.saveQuizAnswer(userId, questionId, today(), choiceIndex);
+  if (!db.getUser(userId)) {
+    return res.status(404).json({ error: "Onbekend account" });
+  }
+
+  const date = today();
+  const todaysQuestion = db.getQuizQuestionsForDate(date, 5).find((q) => q.id === questionId);
+  if (!todaysQuestion) {
+    return res.status(400).json({ error: "Deze vraag hoort niet bij de quiz van vandaag" });
+  }
+  if (!Number.isInteger(choiceIndex) || choiceIndex < 0 || choiceIndex >= todaysQuestion.options.length) {
+    return res.status(400).json({ error: "Ongeldige keuze" });
+  }
+
+  db.saveQuizAnswer(userId, questionId, date, choiceIndex);
   res.json({ ok: true });
 });
 
@@ -144,7 +193,7 @@ app.get("/api/quiz/matches/:userId", (req, res) => {
     .map(([otherId, v]) => {
       const user = db.getUser(otherId);
       return {
-        id: otherId,
+        roomId: roomIdFor(userId, otherId),
         alias: user ? user.alias : "Onbekend",
         overlap: v.overlap,
         shared: v.shared,
@@ -158,14 +207,46 @@ app.get("/api/quiz/matches/:userId", (req, res) => {
 });
 
 /* ---- SOCKET.IO CHAT ---- */
+const MESSAGE_WINDOW_MS = 10 * 1000;
+const MESSAGE_MAX_PER_WINDOW = 15;
+
+// Een roomId is altijd "kleinsteId_grootsteId" (zie roomIdFor) — zo kunnen we
+// controleren of een userId daadwerkelijk bij die room hoort, zonder een aparte
+// sessielaag te bouwen.
+function isParticipant(roomId, userId) {
+  if (typeof roomId !== "string" || typeof userId !== "string") return false;
+  return roomId.split("_").includes(userId);
+}
+
 io.on("connection", (socket) => {
-  socket.on("join", (roomId) => socket.join(roomId));
+  let messageTimestamps = [];
 
-  socket.on("message", ({ roomId, from, text }) => {
-    const msg = { from, text, time: new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" }) };
-    db.addMessage(roomId, msg.from, msg.text, msg.time);
+  socket.on("join", ({ roomId, userId } = {}) => {
+    if (!isParticipant(roomId, userId) || !db.getUser(userId)) return;
+    socket.data.userId = userId;
+    socket.join(roomId);
+  });
 
-    const tip = nvcCheck(text);
+  socket.on("message", ({ roomId, text }) => {
+    const userId = socket.data.userId;
+    if (!isParticipant(roomId, userId)) return;
+    if (typeof text !== "string" || !text.trim()) return;
+
+    const now = Date.now();
+    messageTimestamps = messageTimestamps.filter((t) => now - t < MESSAGE_WINDOW_MS);
+    if (messageTimestamps.length >= MESSAGE_MAX_PER_WINDOW) return;
+    messageTimestamps.push(now);
+
+    const cleanText = text.trim().slice(0, 2000);
+    // De afzendernaam komt van de server (via het geverifieerde userId), nooit
+    // van de client — anders kan iemand zich voordoen als de ander in de room.
+    const sender = db.getUser(userId);
+    const fromAlias = sender ? sender.alias : "Anoniem";
+
+    const msg = { userId, from: fromAlias, text: cleanText, time: new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" }) };
+    db.addMessage(roomId, userId, msg.from, msg.text, msg.time);
+
+    const tip = nvcCheck(cleanText);
     io.to(roomId).emit("message", msg);
     if (tip) socket.emit("nvc-tip", tip);
   });
@@ -434,6 +515,12 @@ const socket = io();
 let myId = null;
 let currentRoom = null;
 
+function escapeHtml(str) {
+  return String(str ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
 // ---- NAVIGATION ----
 function nextTo(screenId) {
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
@@ -524,24 +611,27 @@ async function loadMatches() {
 
   el.innerHTML = matches.map(m => {
     const pct = Math.round((m.score / 7) * 100);
-    return \`<div class="tile match-tile" onclick="openChat('\${m.id}', '\${m.alias}')">
-      <strong>\${m.alias}</strong>
-      <div class="badge">\${m.energie}</div>
+    return \`<div class="tile match-tile" data-room="\${escapeHtml(m.roomId)}" data-alias="\${escapeHtml(m.alias)}">
+      <strong>\${escapeHtml(m.alias)}</strong>
+      <div class="badge">\${escapeHtml(m.energie)}</div>
       <div class="score-bar"><div class="score-fill" style="width:\${pct}%"></div></div>
       <div class="small" style="margin:6px 0 0">\${pct}% compatibiliteit</div>
     </div>\`;
   }).join("");
+
+  el.querySelectorAll(".match-tile").forEach((tile) => {
+    tile.addEventListener("click", () => openChat(tile.dataset.room, tile.dataset.alias));
+  });
 }
 
 // ---- CHAT ----
-function openChat(partnerId, partnerAlias) {
-  const ids = [myId, partnerId].sort();
-  currentRoom = ids.join("_");
+function openChat(roomId, partnerAlias) {
+  currentRoom = roomId;
   document.getElementById("chatPartnerName").innerText = partnerAlias;
   document.getElementById("chatMessages").innerHTML = "";
   document.getElementById("nvcBanner").style.display = "none";
   showScreen("s-chat");
-  socket.emit("join", currentRoom);
+  socket.emit("join", { roomId: currentRoom, userId: myId });
   loadHistory();
 }
 
@@ -556,8 +646,7 @@ function sendMsg() {
   const input = document.getElementById("chatInput");
   const text = input.value.trim();
   if (!text || !currentRoom) return;
-  const profile = JSON.parse(localStorage.getItem("nd_profile") || "{}");
-  socket.emit("message", { roomId: currentRoom, from: profile.alias || "Jij", text });
+  socket.emit("message", { roomId: currentRoom, userId: myId, text });
   input.value = "";
 }
 
@@ -574,12 +663,11 @@ socket.on("nvc-tip", (tip) => {
 });
 
 function renderMsg(msg) {
-  const profile = JSON.parse(localStorage.getItem("nd_profile") || "{}");
-  const isMine = msg.from === (profile.alias || "Jij");
+  const isMine = msg.userId === myId;
   const wrap = document.getElementById("chatMessages");
   const div = document.createElement("div");
   div.className = "msg " + (isMine ? "mine" : "theirs");
-  div.innerHTML = \`<div>\${msg.text}</div><div class="msg-time">\${msg.from} · \${msg.time}</div>\`;
+  div.innerHTML = \`<div>\${escapeHtml(msg.text)}</div><div class="msg-time">\${escapeHtml(msg.from)} · \${escapeHtml(msg.time)}</div>\`;
   wrap.appendChild(div);
 }
 
@@ -614,9 +702,9 @@ async function renderCommunity() {
   }
   el.innerHTML = posts.map((p) => \`
     <div class="tile">
-      <strong style="font-size:13px">\${p.alias}</strong>
-      <span class="small" style="float:right">\${p.time}</span>
-      <p style="margin:8px 0 0">\${p.text}</p>
+      <strong style="font-size:13px">\${escapeHtml(p.alias)}</strong>
+      <span class="small" style="float:right">\${escapeHtml(p.time)}</span>
+      <p style="margin:8px 0 0">\${escapeHtml(p.text)}</p>
     </div>\`).join("");
 }
 
@@ -625,11 +713,11 @@ function renderProfile() {
   const p = JSON.parse(localStorage.getItem("nd_profile") || "{}");
   document.getElementById("profileCard").innerHTML = \`
     <div class="section-label">Jouw gegevens</div>
-    <div class="tile"><strong>Alias:</strong> \${p.alias || "Anoniem"}</div>
-    <div class="tile"><strong>Energie:</strong> \${p.energie || "—"}</div>
+    <div class="tile"><strong>Alias:</strong> \${escapeHtml(p.alias || "Anoniem")}</div>
+    <div class="tile"><strong>Energie:</strong> \${escapeHtml(p.energie || "—")}</div>
     <div class="tile"><strong>Geluidsgevoelig:</strong> \${p.geluid ? "Ja" : "Nee"}</div>
     <div class="tile"><strong>Druktegevoel:</strong> \${p.drukte ? "Ja" : "Nee"}</div>
-    \${p.communicatie ? \`<div class="tile"><strong>Communicatie:</strong><br>\${p.communicatie}</div>\` : ""}
+    \${p.communicatie ? \`<div class="tile"><strong>Communicatie:</strong><br>\${escapeHtml(p.communicatie)}</div>\` : ""}
     <div class="tile"><strong>Open voor romantiek via community:</strong> \${p.openVoorRomantiek ? "Ja" : "Nee"}</div>
   \`;
 }

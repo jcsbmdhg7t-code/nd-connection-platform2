@@ -20,6 +20,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
     from_alias TEXT NOT NULL,
     text TEXT NOT NULL,
     time TEXT NOT NULL,
@@ -126,15 +127,15 @@ function rowToUser(row) {
 }
 
 /* ---- MESSAGES ---- */
-function addMessage(roomId, from, text, time) {
+function addMessage(roomId, userId, from, text, time) {
   db.prepare(`
-    INSERT INTO messages (room_id, from_alias, text, time) VALUES (?, ?, ?, ?)
-  `).run(roomId, from, text, time);
+    INSERT INTO messages (room_id, user_id, from_alias, text, time) VALUES (?, ?, ?, ?, ?)
+  `).run(roomId, userId, from, text, time);
 }
 
 function getMessages(roomId) {
   return db.prepare(`
-    SELECT from_alias AS "from", text, time FROM messages WHERE room_id = ? ORDER BY id ASC
+    SELECT user_id AS "userId", from_alias AS "from", text, time FROM messages WHERE room_id = ? ORDER BY id ASC
   `).all(roomId);
 }
 

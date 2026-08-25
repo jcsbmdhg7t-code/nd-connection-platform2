@@ -60,6 +60,13 @@ app.get("/api/matches/:userId", (req, res) => {
   res.json(getMatches(req.params.userId));
 });
 
+// Herstel-login: je account-ID is je enige toegangscode (geen e-mail/wachtwoord nodig).
+app.get("/api/users/:id", (req, res) => {
+  const user = db.getUser(req.params.id);
+  if (!user) return res.status(404).json({ error: "Onbekende code" });
+  res.json(user);
+});
+
 app.get("/api/messages/:roomId", (req, res) => {
   res.json(db.getMessages(req.params.roomId));
 });
@@ -247,6 +254,28 @@ button.danger{background:var(--danger);color:white}
     <label>Kies een alias (optioneel)</label>
     <input id="alias" placeholder="Anoniem">
     <button onclick="nextTo('s-energy')">Verder →</button>
+    <button class="sec sm" onclick="nextTo('s-login')">Ik heb al een account</button>
+  </div>
+</div>
+
+<div class="screen" id="s-login">
+  <div class="card" style="margin-top:auto;margin-bottom:auto">
+    <h1>Terug op ND Connection</h1>
+    <p>Vul je herstelcode in — die heb je gekregen toen je je account maakte.</p>
+    <input id="loginCode" placeholder="Jouw herstelcode">
+    <p class="small" id="loginError" style="display:none;color:var(--danger);margin:6px 0 0">Deze code kennen we niet. Check op typefouten.</p>
+    <button onclick="loginWithCode()">Inloggen</button>
+    <button class="sec" onclick="nextTo('s-welcome')">← Terug</button>
+  </div>
+</div>
+
+<div class="screen" id="s-savecode">
+  <div class="card" style="margin-top:auto;margin-bottom:auto">
+    <h1>Bewaar je herstelcode</h1>
+    <p>Dit is je enige toegang tot je account — er is geen e-mail of wachtwoord. Bewaar 'm ergens veilig, dan kun je altijd terug, ook op een ander apparaat.</p>
+    <input id="savecodeValue" readonly>
+    <button class="sec" onclick="copySavecode()">Kopieer code</button>
+    <button onclick="showScreen('s-matching')">Ik heb 'm bewaard, verder →</button>
   </div>
 </div>
 
@@ -304,7 +333,8 @@ button.danger{background:var(--danger);color:white}
     <div class="rule">✔ Geen druk of tijdsdruk</div>
     <div class="rule">✔ Respect voor prikkelgevoeligheid</div>
     <div class="rule">✔ Geweldloze communicatie (NVC)</div>
-    <button class="danger sm" onclick="resetApp()">Alles wissen & opnieuw</button>
+    <p class="small" style="margin:12px 0 0">Je account blijft bestaan — bewaar je herstelcode om later weer in te loggen.</p>
+    <button class="sec sm" onclick="resetApp()">Uitloggen op dit apparaat</button>
   </div>
 </div>
 
@@ -377,6 +407,38 @@ async function register() {
   localStorage.setItem("nd_id", myId);
   localStorage.setItem("nd_profile", JSON.stringify({ alias, energie, geluid, drukte, communicatie, openVoorRomantiek }));
 
+  document.getElementById("savecodeValue").value = myId;
+  showScreen("s-savecode");
+}
+
+function copySavecode() {
+  const input = document.getElementById("savecodeValue");
+  input.select();
+  navigator.clipboard?.writeText(input.value).catch(() => {});
+}
+
+async function loginWithCode() {
+  const code = document.getElementById("loginCode").value.trim();
+  const errorEl = document.getElementById("loginError");
+  errorEl.style.display = "none";
+  if (!code) return;
+
+  const res = await fetch("/api/users/" + encodeURIComponent(code));
+  if (!res.ok) {
+    errorEl.style.display = "block";
+    return;
+  }
+  const user = await res.json();
+  myId = code;
+  localStorage.setItem("nd_id", myId);
+  localStorage.setItem("nd_profile", JSON.stringify({
+    alias: user.alias,
+    energie: user.energie,
+    geluid: user.geluid,
+    drukte: user.drukte,
+    communicatie: user.communicatie,
+    openVoorRomantiek: user.openVoorRomantiek,
+  }));
   showScreen("s-matching");
 }
 
@@ -505,7 +567,7 @@ function renderProfile() {
 }
 
 function resetApp() {
-  if (confirm("Weet je het zeker? Alle gegevens worden gewist.")) {
+  if (confirm("Je wordt uitgelogd op dit apparaat. Je account en gegevens blijven bestaan — log met je herstelcode weer in.")) {
     localStorage.clear();
     location.reload();
   }

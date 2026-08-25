@@ -89,6 +89,74 @@ app.post("/api/community", (req, res) => {
   res.json({ ok: true });
 });
 
+/* ---- DAGELIJKSE QUIZ (matching, geen swipen) ---- */
+function today() { return new Date().toISOString().slice(0, 10); }
+
+app.get("/api/quiz/today", (req, res) => {
+  const { userId } = req.query;
+  const date = today();
+  const questions = db.getQuizQuestionsForDate(date, 5);
+  const answered = userId
+    ? new Set(db.getUserAnswersForRound(userId, date).map((a) => a.questionId))
+    : new Set();
+  res.json({
+    date,
+    questions: questions.map((q) => ({ ...q, answered: answered.has(q.id) })),
+  });
+});
+
+app.post("/api/quiz/answer", (req, res) => {
+  const { userId, questionId, choiceIndex } = req.body;
+  if (!userId || questionId === undefined || choiceIndex === undefined) {
+    return res.status(400).json({ error: "userId, questionId en choiceIndex zijn verplicht" });
+  }
+  db.saveQuizAnswer(userId, questionId, today(), choiceIndex);
+  res.json({ ok: true });
+});
+
+app.get("/api/quiz/matches/:userId", (req, res) => {
+  const date = today();
+  const userId = req.params.userId;
+  const myAnswers = db.getUserAnswersForRound(userId, date);
+  if (myAnswers.length === 0) return res.json({ date, matches: [], reason: "nog niet meegedaan vandaag" });
+
+  const myMap = new Map(myAnswers.map((a) => [a.questionId, a.choiceIndex]));
+  const others = db.getOtherAnswersForRound(userId, date);
+
+  const perUser = new Map();
+  for (const a of others) {
+    if (!myMap.has(a.questionId)) continue;
+    if (!perUser.has(a.userId)) perUser.set(a.userId, { shared: 0, overlap: 0, questionIds: [] });
+    const entry = perUser.get(a.userId);
+    entry.shared += 1;
+    if (myMap.get(a.questionId) === a.choiceIndex) {
+      entry.overlap += 1;
+      entry.questionIds.push(a.questionId);
+    }
+  }
+
+  const questionsById = new Map(
+    db.getQuizQuestionsForDate(date, 5).map((q) => [q.id, q])
+  );
+
+  const matches = [...perUser.entries()]
+    .filter(([, v]) => v.shared > 0)
+    .map(([otherId, v]) => {
+      const user = db.getUser(otherId);
+      return {
+        id: otherId,
+        alias: user ? user.alias : "Onbekend",
+        overlap: v.overlap,
+        shared: v.shared,
+        matchedOn: v.questionIds.map((qid) => questionsById.get(qid)?.text).filter(Boolean),
+      };
+    })
+    .sort((a, b) => b.overlap - a.overlap)
+    .slice(0, 10);
+
+  res.json({ date, matches });
+});
+
 /* ---- SOCKET.IO CHAT ---- */
 io.on("connection", (socket) => {
   socket.on("join", (roomId) => socket.join(roomId));

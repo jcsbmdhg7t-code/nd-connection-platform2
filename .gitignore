@@ -1,3 +1,9 @@
+# Runtime database (SQLite)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Logs
 logs
 *.log

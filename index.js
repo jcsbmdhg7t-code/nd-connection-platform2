@@ -3,6 +3,7 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const crypto = require("crypto");
+const db = require("./db");
 
 const app = express();
 const server = http.createServer(app);
@@ -11,11 +12,6 @@ const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-/* ---- IN-MEMORY OPSLAG ---- */
-const users = {};       // userId -> profile
-const messages = {};    // roomId -> [msg]
-const reports = [];
 
 function genId() { return crypto.randomBytes(6).toString("hex"); }
 
@@ -28,11 +24,10 @@ function matchScore(a, b) {
 }
 
 function getMatches(userId) {
-  const me = users[userId];
+  const me = db.getUser(userId);
   if (!me) return [];
-  return Object.entries(users)
-    .filter(([id]) => id !== userId)
-    .map(([id, u]) => ({ id, alias: u.alias, energie: u.energie, score: matchScore(me, u) }))
+  return db.getOtherUsers(userId)
+    .map((u) => ({ id: u.id, alias: u.alias, energie: u.energie, score: matchScore(me, u) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
 }
@@ -48,10 +43,17 @@ function nvcCheck(text) {
 
 /* ---- API ROUTES ---- */
 app.post("/api/register", (req, res) => {
-  const { alias, energie, geluid, drukte, communicatie } = req.body;
+  const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
   const id = genId();
-  users[id] = { alias: alias || "Anoniem", energie, geluid: geluid === "true", drukte: drukte === "true", communicatie };
-  res.json({ id, alias: users[id].alias });
+  const user = db.createUser(id, {
+    alias: alias || "Anoniem",
+    energie,
+    geluid: geluid === "true",
+    drukte: drukte === "true",
+    communicatie,
+    openVoorRomantiek: openVoorRomantiek === "true",
+  });
+  res.json({ id, alias: user.alias });
 });
 
 app.get("/api/matches/:userId", (req, res) => {
@@ -59,11 +61,24 @@ app.get("/api/matches/:userId", (req, res) => {
 });
 
 app.get("/api/messages/:roomId", (req, res) => {
-  res.json(messages[req.params.roomId] || []);
+  res.json(db.getMessages(req.params.roomId));
 });
 
 app.post("/api/report", (req, res) => {
-  reports.push(req.body);
+  db.addReport(req.body);
+  res.json({ ok: true });
+});
+
+app.get("/api/community", (req, res) => {
+  res.json(db.getCommunityPosts());
+});
+
+app.post("/api/community", (req, res) => {
+  const { alias, text } = req.body;
+  const trimmed = (text || "").trim();
+  if (!trimmed) return res.status(400).json({ error: "text is verplicht" });
+  const time = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+  db.addCommunityPost(alias || "Anoniem", trimmed, time);
   res.json({ ok: true });
 });
 
@@ -72,9 +87,8 @@ io.on("connection", (socket) => {
   socket.on("join", (roomId) => socket.join(roomId));
 
   socket.on("message", ({ roomId, from, text }) => {
-    if (!messages[roomId]) messages[roomId] = [];
     const msg = { from, text, time: new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" }) };
-    messages[roomId].push(msg);
+    db.addMessage(roomId, msg.from, msg.text, msg.time);
 
     const tip = nvcCheck(text);
     io.to(roomId).emit("message", msg);
@@ -258,6 +272,7 @@ button.danger{background:var(--danger);color:white}
     <h1>Veilige communicatie</h1>
     <p>Wat helpt jou om je veilig te voelen in contact?</p>
     <textarea id="communicatie" placeholder="Bijv. rustig taalgebruik, geen plotselinge vragen, duidelijke structuur..."></textarea>
+    <div class="checkbox"><input type="checkbox" id="openVoorRomantiek"><label for="openVoorRomantiek">Ik sta ook open voor romantische verbinding via de community</label></div>
     <button onclick="register()">Afronden & verder</button>
     <button class="sec" onclick="nextTo('s-energy')">← Terug</button>
   </div>
@@ -320,7 +335,6 @@ button.danger{background:var(--danger);color:white}
 const socket = io();
 let myId = null;
 let currentRoom = null;
-let communityPosts = JSON.parse(localStorage.getItem("nd_community") || "[]");
 
 // ---- NAVIGATION ----
 function nextTo(screenId) {
@@ -351,16 +365,17 @@ async function register() {
   const geluid = document.getElementById("geluid").checked;
   const drukte = document.getElementById("drukte").checked;
   const communicatie = document.getElementById("communicatie").value;
+  const openVoorRomantiek = document.getElementById("openVoorRomantiek").checked;
 
   const res = await fetch("/api/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ alias, energie, geluid: String(geluid), drukte: String(drukte), communicatie })
+    body: JSON.stringify({ alias, energie, geluid: String(geluid), drukte: String(drukte), communicatie, openVoorRomantiek: String(openVoorRomantiek) })
   });
   const data = await res.json();
   myId = data.id;
   localStorage.setItem("nd_id", myId);
-  localStorage.setItem("nd_profile", JSON.stringify({ alias, energie, geluid, drukte, communicatie }));
+  localStorage.setItem("nd_profile", JSON.stringify({ alias, energie, geluid, drukte, communicatie, openVoorRomantiek }));
 
   showScreen("s-matching");
 }
@@ -444,28 +459,34 @@ function scrollChat() {
 }
 
 // ---- COMMUNITY ----
-function addCommunityPost() {
+async function addCommunityPost() {
   const input = document.getElementById("postInput");
   const txt = input.value.trim();
   if (!txt) return;
   const profile = JSON.parse(localStorage.getItem("nd_profile") || "{}");
-  communityPosts.unshift({ txt, alias: profile.alias || "Anoniem", time: new Date().toLocaleTimeString("nl-NL", {hour:"2-digit",minute:"2-digit"}) });
-  localStorage.setItem("nd_community", JSON.stringify(communityPosts));
+  await fetch("/api/community", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ alias: profile.alias || "Anoniem", text: txt })
+  });
   input.value = "";
   renderCommunity();
 }
 
-function renderCommunity() {
+async function renderCommunity() {
   const el = document.getElementById("communityPosts");
-  if (communityPosts.length === 0) {
+  const res = await fetch("/api/community");
+  const posts = await res.json();
+
+  if (posts.length === 0) {
     el.innerHTML = '<p class="small" style="font-style:italic">Nog geen berichten...</p>';
     return;
   }
-  el.innerHTML = communityPosts.map((p, i) => \`
+  el.innerHTML = posts.map((p) => \`
     <div class="tile">
       <strong style="font-size:13px">\${p.alias}</strong>
       <span class="small" style="float:right">\${p.time}</span>
-      <p style="margin:8px 0 0">\${p.txt}</p>
+      <p style="margin:8px 0 0">\${p.text}</p>
     </div>\`).join("");
 }
 
@@ -479,6 +500,7 @@ function renderProfile() {
     <div class="tile"><strong>Geluidsgevoelig:</strong> \${p.geluid ? "Ja" : "Nee"}</div>
     <div class="tile"><strong>Druktegevoel:</strong> \${p.drukte ? "Ja" : "Nee"}</div>
     \${p.communicatie ? \`<div class="tile"><strong>Communicatie:</strong><br>\${p.communicatie}</div>\` : ""}
+    <div class="tile"><strong>Open voor romantiek via community:</strong> \${p.openVoorRomantiek ? "Ja" : "Nee"}</div>
   \`;
 }
 

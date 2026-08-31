@@ -50,12 +50,13 @@ function matchScore(a, b) {
   return score;
 }
 
-function getMatches(userId) {
-  const me = db.getUser(userId);
+async function getMatches(userId) {
+  const me = await db.getUser(userId);
   if (!me) return [];
   // Geen ruwe account-ID's van anderen teruggeven — dat is sinds de herstelcode-login
   // hun volledige accounttoegang. Een roomId is voldoende om te kunnen chatten.
-  return db.getOtherUsers(userId)
+  const others = await db.getOtherUsers(userId);
+  return others
     .map((u) => ({ roomId: roomIdFor(userId, u.id), alias: u.alias, energie: u.energie, score: matchScore(me, u) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
@@ -71,139 +72,168 @@ function nvcCheck(text) {
 }
 
 /* ---- API ROUTES ---- */
-app.post("/api/register", registerLimiter, (req, res) => {
-  const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
+app.post("/api/register", registerLimiter, async (req, res, next) => {
+  try {
+    const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
 
-  if (energie !== undefined && !ENERGIE_OPTIONS.includes(energie)) {
-    return res.status(400).json({ error: "Ongeldige waarde voor energie" });
-  }
+    const cleanAlias = cleanString(alias, 40);
+    if (!cleanAlias) {
+      return res.status(400).json({ error: "Naam is verplicht" });
+    }
 
-  const id = genId();
-  const user = db.createUser(id, {
-    alias: cleanString(alias, 40) || "Anoniem",
-    energie,
-    geluid: geluid === "true",
-    drukte: drukte === "true",
-    communicatie: cleanString(communicatie, 1000),
-    openVoorRomantiek: openVoorRomantiek === "true",
-  });
-  res.json({ id, alias: user.alias });
+    if (energie !== undefined && !ENERGIE_OPTIONS.includes(energie)) {
+      return res.status(400).json({ error: "Ongeldige waarde voor energie" });
+    }
+
+    const id = genId();
+    const user = await db.createUser(id, {
+      alias: cleanAlias,
+      energie,
+      geluid: geluid === "true",
+      drukte: drukte === "true",
+      communicatie: cleanString(communicatie, 1000),
+      openVoorRomantiek: openVoorRomantiek === "true",
+    });
+    res.json({ id, alias: user.alias });
+  } catch (err) { next(err); }
 });
 
-app.get("/api/matches/:userId", (req, res) => {
-  res.json(getMatches(req.params.userId));
+app.get("/api/matches/:userId", async (req, res, next) => {
+  try {
+    res.json(await getMatches(req.params.userId));
+  } catch (err) { next(err); }
 });
 
 // Herstel-login: je account-ID is je enige toegangscode (geen e-mail/wachtwoord nodig).
-app.get("/api/users/:id", (req, res) => {
-  const user = db.getUser(req.params.id);
-  if (!user) return res.status(404).json({ error: "Onbekende code" });
-  res.json(user);
+app.get("/api/users/:id", async (req, res, next) => {
+  try {
+    const user = await db.getUser(req.params.id);
+    if (!user) return res.status(404).json({ error: "Onbekende code" });
+    res.json(user);
+  } catch (err) { next(err); }
 });
 
-app.get("/api/messages/:roomId", (req, res) => {
-  res.json(db.getMessages(req.params.roomId));
+app.get("/api/messages/:roomId", async (req, res, next) => {
+  try {
+    res.json(await db.getMessages(req.params.roomId));
+  } catch (err) { next(err); }
 });
 
-app.post("/api/report", (req, res) => {
-  const payload = JSON.stringify(req.body || {});
-  if (payload.length > 5000) return res.status(400).json({ error: "Melding is te lang" });
-  db.addReport(req.body);
-  res.json({ ok: true });
+app.post("/api/report", async (req, res, next) => {
+  try {
+    const payload = JSON.stringify(req.body || {});
+    if (payload.length > 5000) return res.status(400).json({ error: "Melding is te lang" });
+    await db.addReport(req.body);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
-app.get("/api/community", (req, res) => {
-  res.json(db.getCommunityPosts());
+app.get("/api/community", async (req, res, next) => {
+  try {
+    res.json(await db.getCommunityPosts());
+  } catch (err) { next(err); }
 });
 
-app.post("/api/community", (req, res) => {
-  const { alias, text } = req.body;
-  const trimmed = cleanString(text, 500);
-  if (!trimmed) return res.status(400).json({ error: "text is verplicht (max 500 tekens)" });
-  const time = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
-  db.addCommunityPost(cleanString(alias, 40) || "Anoniem", trimmed, time);
-  res.json({ ok: true });
+app.post("/api/community", async (req, res, next) => {
+  try {
+    const { alias, text } = req.body;
+    const trimmed = cleanString(text, 500);
+    if (!trimmed) return res.status(400).json({ error: "text is verplicht (max 500 tekens)" });
+    const cleanAlias = cleanString(alias, 40);
+    if (!cleanAlias) return res.status(400).json({ error: "Naam is verplicht" });
+    const time = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+    await db.addCommunityPost(cleanAlias, trimmed, time);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 /* ---- DAGELIJKSE QUIZ (matching, geen swipen) ---- */
 function today() { return new Date().toISOString().slice(0, 10); }
 
-app.get("/api/quiz/today", (req, res) => {
-  const { userId } = req.query;
-  const date = today();
-  const questions = db.getQuizQuestionsForDate(date, 5);
-  const answered = userId
-    ? new Set(db.getUserAnswersForRound(userId, date).map((a) => a.questionId))
-    : new Set();
-  res.json({
-    date,
-    questions: questions.map((q) => ({ ...q, answered: answered.has(q.id) })),
-  });
+app.get("/api/quiz/today", async (req, res, next) => {
+  try {
+    const { userId } = req.query;
+    const date = today();
+    const questions = await db.getQuizQuestionsForDate(date, 5);
+    const answered = userId
+      ? new Set((await db.getUserAnswersForRound(userId, date)).map((a) => a.questionId))
+      : new Set();
+    res.json({
+      date,
+      questions: questions.map((q) => ({ ...q, answered: answered.has(q.id) })),
+    });
+  } catch (err) { next(err); }
 });
 
-app.post("/api/quiz/answer", (req, res) => {
-  const { userId, questionId, choiceIndex } = req.body;
-  if (!userId || questionId === undefined || choiceIndex === undefined) {
-    return res.status(400).json({ error: "userId, questionId en choiceIndex zijn verplicht" });
-  }
-  if (!db.getUser(userId)) {
-    return res.status(404).json({ error: "Onbekend account" });
-  }
-
-  const date = today();
-  const todaysQuestion = db.getQuizQuestionsForDate(date, 5).find((q) => q.id === questionId);
-  if (!todaysQuestion) {
-    return res.status(400).json({ error: "Deze vraag hoort niet bij de quiz van vandaag" });
-  }
-  if (!Number.isInteger(choiceIndex) || choiceIndex < 0 || choiceIndex >= todaysQuestion.options.length) {
-    return res.status(400).json({ error: "Ongeldige keuze" });
-  }
-
-  db.saveQuizAnswer(userId, questionId, date, choiceIndex);
-  res.json({ ok: true });
-});
-
-app.get("/api/quiz/matches/:userId", (req, res) => {
-  const date = today();
-  const userId = req.params.userId;
-  const myAnswers = db.getUserAnswersForRound(userId, date);
-  if (myAnswers.length === 0) return res.json({ date, matches: [], reason: "nog niet meegedaan vandaag" });
-
-  const myMap = new Map(myAnswers.map((a) => [a.questionId, a.choiceIndex]));
-  const others = db.getOtherAnswersForRound(userId, date);
-
-  const perUser = new Map();
-  for (const a of others) {
-    if (!myMap.has(a.questionId)) continue;
-    if (!perUser.has(a.userId)) perUser.set(a.userId, { shared: 0, overlap: 0, questionIds: [] });
-    const entry = perUser.get(a.userId);
-    entry.shared += 1;
-    if (myMap.get(a.questionId) === a.choiceIndex) {
-      entry.overlap += 1;
-      entry.questionIds.push(a.questionId);
+app.post("/api/quiz/answer", async (req, res, next) => {
+  try {
+    const { userId, questionId, choiceIndex } = req.body;
+    if (!userId || questionId === undefined || choiceIndex === undefined) {
+      return res.status(400).json({ error: "userId, questionId en choiceIndex zijn verplicht" });
     }
-  }
+    if (!(await db.getUser(userId))) {
+      return res.status(404).json({ error: "Onbekend account" });
+    }
 
-  const questionsById = new Map(
-    db.getQuizQuestionsForDate(date, 5).map((q) => [q.id, q])
-  );
+    const date = today();
+    const todaysQuestion = (await db.getQuizQuestionsForDate(date, 5)).find((q) => q.id === questionId);
+    if (!todaysQuestion) {
+      return res.status(400).json({ error: "Deze vraag hoort niet bij de quiz van vandaag" });
+    }
+    if (!Number.isInteger(choiceIndex) || choiceIndex < 0 || choiceIndex >= todaysQuestion.options.length) {
+      return res.status(400).json({ error: "Ongeldige keuze" });
+    }
 
-  const matches = [...perUser.entries()]
-    .filter(([, v]) => v.shared > 0)
-    .map(([otherId, v]) => {
-      const user = db.getUser(otherId);
-      return {
-        roomId: roomIdFor(userId, otherId),
-        alias: user ? user.alias : "Onbekend",
-        overlap: v.overlap,
-        shared: v.shared,
-        matchedOn: v.questionIds.map((qid) => questionsById.get(qid)?.text).filter(Boolean),
-      };
-    })
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, 10);
+    await db.saveQuizAnswer(userId, questionId, date, choiceIndex);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
 
-  res.json({ date, matches });
+app.get("/api/quiz/matches/:userId", async (req, res, next) => {
+  try {
+    const date = today();
+    const userId = req.params.userId;
+    const myAnswers = await db.getUserAnswersForRound(userId, date);
+    if (myAnswers.length === 0) return res.json({ date, matches: [], reason: "nog niet meegedaan vandaag" });
+
+    const myMap = new Map(myAnswers.map((a) => [a.questionId, a.choiceIndex]));
+    const others = await db.getOtherAnswersForRound(userId, date);
+
+    const perUser = new Map();
+    for (const a of others) {
+      if (!myMap.has(a.questionId)) continue;
+      if (!perUser.has(a.userId)) perUser.set(a.userId, { shared: 0, overlap: 0, questionIds: [] });
+      const entry = perUser.get(a.userId);
+      entry.shared += 1;
+      if (myMap.get(a.questionId) === a.choiceIndex) {
+        entry.overlap += 1;
+        entry.questionIds.push(a.questionId);
+      }
+    }
+
+    const questionsById = new Map(
+      (await db.getQuizQuestionsForDate(date, 5)).map((q) => [q.id, q])
+    );
+
+    const matches = (await Promise.all(
+      [...perUser.entries()]
+        .filter(([, v]) => v.shared > 0)
+        .map(async ([otherId, v]) => {
+          const user = await db.getUser(otherId);
+          return {
+            roomId: roomIdFor(userId, otherId),
+            alias: user ? user.alias : "Onbekend",
+            overlap: v.overlap,
+            shared: v.shared,
+            matchedOn: v.questionIds.map((qid) => questionsById.get(qid)?.text).filter(Boolean),
+          };
+        })
+    ))
+      .sort((a, b) => b.overlap - a.overlap)
+      .slice(0, 10);
+
+    res.json({ date, matches });
+  } catch (err) { next(err); }
 });
 
 /* ---- SOCKET.IO CHAT ---- */
@@ -221,13 +251,13 @@ function isParticipant(roomId, userId) {
 io.on("connection", (socket) => {
   let messageTimestamps = [];
 
-  socket.on("join", ({ roomId, userId } = {}) => {
-    if (!isParticipant(roomId, userId) || !db.getUser(userId)) return;
+  socket.on("join", async ({ roomId, userId } = {}) => {
+    if (!isParticipant(roomId, userId) || !(await db.getUser(userId))) return;
     socket.data.userId = userId;
     socket.join(roomId);
   });
 
-  socket.on("message", ({ roomId, text }) => {
+  socket.on("message", async ({ roomId, text }) => {
     const userId = socket.data.userId;
     if (!isParticipant(roomId, userId)) return;
     if (typeof text !== "string" || !text.trim()) return;
@@ -240,11 +270,12 @@ io.on("connection", (socket) => {
     const cleanText = text.trim().slice(0, 2000);
     // De afzendernaam komt van de server (via het geverifieerde userId), nooit
     // van de client — anders kan iemand zich voordoen als de ander in de room.
-    const sender = db.getUser(userId);
-    const fromAlias = sender ? sender.alias : "Anoniem";
+    const sender = await db.getUser(userId);
+    if (!sender) return;
+    const fromAlias = sender.alias;
 
     const msg = { userId, from: fromAlias, text: cleanText, time: new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" }) };
-    db.addMessage(roomId, userId, msg.from, msg.text, msg.time);
+    await db.addMessage(roomId, userId, msg.from, msg.text, msg.time);
 
     const tip = nvcCheck(cleanText);
     io.to(roomId).emit("message", msg);
@@ -264,7 +295,7 @@ app.get("/", (req, res) => {
 <script src="/socket.io/socket.io.js"><\/script>
 <style>
 :root{
-  --blue:#16225c; --green:#3355e8; --sea:#7a93e0;
+--blue:#16225c;--green:#3355e8;--sea:#7a93e0;
   --naples:#f2d98d; --orange:#c96b3c; --ochre:#c9a24d;
   --glass:rgba(255,255,255,.08); --border:rgba(255,255,255,.16);
   --text:#eef7f5; --muted:#b9d6cf;
@@ -391,18 +422,19 @@ button.danger{background:var(--danger);color:white}
 /* ---- MISC ---- */
 .section-label{font-size:12px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
 .rule{padding:10px 14px;border-radius:12px;background:rgba(255,255,255,.07);margin-bottom:8px;font-size:14px}
-</style>
+:root{--gold:#f0b429;--cream:#f7f2ea;--ink:#182238;--ink-soft:#5b6472;--card-border:#e6ddce;--accent:#3355e8}.brand{display:flex;align-items:center;gap:8px;color:var(--naples);font-weight:700;letter-spacing:.12em;text-transform:uppercase;font-size:12px;margin-bottom:22px}.brand .dot{width:16px;height:16px;border-radius:50%;border:2px solid var(--naples);display:inline-block}.hero-card{background:rgba(3,10,20,.55);border-radius:22px;padding:26px 24px;margin-bottom:22px}.hero-card h1{font-size:30px;line-height:1.25;margin:0}.hero-card h1 .accent{color:var(--naples)}#s-welcome .card{background:transparent;border:none;backdrop-filter:none;box-shadow:none;padding:0}#s-welcome input{background:transparent;border:none;border-bottom:1px solid var(--border);border-radius:0;padding:10px 2px}#s-matching,#s-community,#s-profile,#s-chat{background:var(--cream);color:var(--ink)}#s-matching h1,#s-matching h2,#s-community h1,#s-community h2,#s-profile h1,#s-profile h2{color:var(--ink);font-weight:700}#s-matching p,#s-matching .small,#s-community p,#s-community .small,#s-profile p,#s-profile .small{color:var(--ink-soft)}#s-matching .card,#s-community .card,#s-profile .card,#s-matching .tile,#s-community .tile,#s-profile .tile{background:#fff;border:1.5px solid var(--card-border);backdrop-filter:none;box-shadow:none;color:var(--ink)}#s-matching .badge{background:#f1eee6;color:var(--ink-soft)}#s-matching .match-tile:hover{background:#faf7f0}#s-profile .badge{background:var(--gold);color:var(--blue);font-weight:700}#s-community input{background:#fff;border:1.5px solid var(--card-border);color:var(--ink)}#s-community button.sm{background:var(--sea);color:#fff;width:auto;display:inline-block}.badge-gold{display:inline-block;background:var(--gold);color:var(--blue);font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:7px 16px;border-radius:999px;font-size:12px;margin-bottom:14px}.quiz-options{display:flex;flex-direction:column;gap:10px;margin-top:16px}.quiz-opt{text-align:left;background:#fff;border:1.5px solid var(--card-border);color:var(--ink);font-weight:500;padding:14px 16px}.quiz-opt.picked{border-color:var(--accent);background:rgba(51,85,232,.06)}.notice-box{background:#eceafc;border:1px solid #d7d3f5;border-radius:14px;padding:14px 16px;font-size:13px;color:var(--ink-soft);margin-top:14px}.avatar{width:40px;height:40px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0}.avatar-lg{width:56px;height:56px;font-size:22px}#s-profile .rule{background:#fff;border:1px solid var(--card-border);color:var(--ink);display:flex;align-items:center;gap:10px}#s-profile .rule .check{color:var(--gold);font-weight:700}#s-chat .chat-wrap{background:var(--cream)}#s-chat .chat-header{background:#fff;border-bottom:1px solid var(--card-border);color:var(--ink)}#s-chat .msg.theirs{background:#fff;border:1px solid var(--card-border);color:var(--ink)}#s-chat .msg.mine{background:var(--accent);color:#fff}#s-chat .chat-input-area{background:#fff;border-top:1px solid var(--card-border)}#s-chat .chat-input-area input{background:var(--cream);color:var(--ink);border:1px solid var(--card-border)}.bottom-nav{background:#fff;border-top:1px solid var(--card-border)}.nav-btn{color:#9aa3ae}.nav-btn.active,.nav-btn:hover{color:var(--accent)}.match-reason{font-size:12px;color:var(--ink-soft);margin:2px 0 0}</style>
 </head>
 <body>
 
 <!-- ONBOARDING -->
 <div class="screen active" id="s-welcome">
   <div class="card" style="margin-top:auto;margin-bottom:auto">
-    <h1>ND Connection</h1>
+    <div class="brand"><span class="dot"></span>ND CONNECTION</div><div class="hero-card"><h1>Eindelijk ergens waar je jezelf niet hoeft te <span class="accent">vertalen.</span></h1></div>
     <p>Een veilige plek voor neurodivergente verbinding. Rustig, vrijwillig, op jouw tempo.</p>
-    <label>Kies een alias (optioneel)</label>
-    <input id="alias" placeholder="Anoniem">
-    <button onclick="nextTo('s-energy')">Verder →</button>
+    <label>Je naam</label>
+    <input id="alias" placeholder="Voer je naam in">
+    <p class="small" style="margin:6px 0 0">We werken met echte namen. Dat houdt dit platform veilig en betrouwbaar — geen anonieme accounts.</p>
+    <button onclick="tryNextToEnergy()">Verder →</button>
     <button class="sec sm" onclick="nextTo('s-login')">Ik heb al een account</button>
   </div>
 </div>
@@ -457,31 +489,16 @@ button.danger{background:var(--danger);color:white}
 </div>
 
 <!-- MAIN APP -->
-<div class="screen" id="s-matching">
-  <h2 style="margin-bottom:0">Zachte matching</h2>
-  <p>Op basis van jouw profiel — klik om te chatten.</p>
-  <div id="matchList"></div>
-</div>
+<div class="screen" id="s-matching"><div class="badge-gold">VANDAAG</div><h2 style="margin-bottom:0">Eén goed moment per dag, geen <span style="color:var(--accent)">eindeloze feed</span>.</h2><div class="card" style="margin-top:16px"><p id="quizQuestion" style="margin-bottom:0">Vraag laden…</p><div class="quiz-options" id="quizOptions"></div></div><p class="small" style="margin-top:14px" id="quizHelper">Beantwoord de vraag om je matches van vandaag te zien.</p><h2 style="margin-top:28px">Zachte matching</h2><p>Op basis van jouw profiel — klik om te chatten.</p><div id="matchList"></div></div>
 
-<div class="screen" id="s-community">
-  <h2>Community</h2>
-  <p class="small">Een rustgevende ruimte. Alles is vrijwillig.</p>
-  <div id="communityPosts"></div>
-  <div class="card" style="margin-top:4px">
-    <input id="postInput" placeholder="Deel een moment van rust…">
-    <button onclick="addCommunityPost()">Delen</button>
-  </div>
-</div>
+<div class="screen" id="s-community"><h2>Community</h2><p class="small">Een rustgevende ruimte. Alles is vrijwillig.</p><div class="card" style="margin-bottom:4px"><input id="postInput" placeholder="Deel een moment van rust…"><button class="sm" onclick="addCommunityPost()">Delen</button></div><div id="communityPosts"></div><div class="notice-box">Staat je profiel op “open voor romantiek”? Dan mag je hier zelf iemand aanspreken — de community blijft verder altijd niet-daten.</div></div>
 
 <div class="screen" id="s-profile">
   <h2>Mijn profiel</h2>
   <div class="card" id="profileCard"></div>
   <div class="card" style="margin-top:16px">
     <div class="section-label">Veiligheidsregels</div>
-    <div class="rule">✔ Altijd vrijwillig — je kunt altijd stoppen</div>
-    <div class="rule">✔ Geen druk of tijdsdruk</div>
-    <div class="rule">✔ Respect voor prikkelgevoeligheid</div>
-    <div class="rule">✔ Geweldloze communicatie (NVC)</div>
+    <div class="rule"><span class="check">✓</span> Altijd vrijwillig — je kunt altijd stoppen</div><div class="rule"><span class="check">✓</span> Geen druk of tijdsdruk</div><div class="rule"><span class="check">✓</span> Respect voor prikkelgevoeligheid</div><div class="rule"><span class="check">✓</span> Geweldloze communicatie (NVC)</div>
     <p class="small" style="margin:12px 0 0">Je account blijft bestaan — bewaar je herstelcode om later weer in te loggen.</p>
     <button class="sec sm" onclick="resetApp()">Uitloggen op dit apparaat</button>
   </div>
@@ -492,7 +509,7 @@ button.danger{background:var(--danger);color:white}
   <div class="chat-wrap">
     <div class="chat-header">
       <button onclick="showScreen('s-matching')" style="width:auto;margin:0;padding:8px 14px;font-size:13px;border-radius:12px">← Terug</button>
-      <strong id="chatPartnerName">Chat</strong>
+      <div class="avatar" id="chatAvatar">?</div><div><strong id="chatPartnerName">Chat</strong><div class="match-reason" id="chatReason"></div></div>
     </div>
     <div class="chat-messages" id="chatMessages"></div>
     <div id="nvcBanner" class="nvc-banner" style="display:none"></div>
@@ -527,6 +544,17 @@ function nextTo(screenId) {
   document.getElementById(screenId).classList.add("active");
 }
 
+function tryNextToEnergy() {
+  const aliasInput = document.getElementById("alias");
+  if (!aliasInput.value.trim()) {
+    aliasInput.style.borderColor = "var(--danger)";
+    aliasInput.focus();
+    return;
+  }
+  aliasInput.style.borderColor = "";
+  nextTo("s-energy");
+}
+
 function showScreen(screenId) {
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
   document.getElementById(screenId).classList.add("active");
@@ -538,14 +566,15 @@ function showScreen(screenId) {
   const navMap = {"s-matching":"nav-matching","s-community":"nav-community","s-profile":"nav-profile"};
   if(navMap[screenId]) document.getElementById(navMap[screenId]).classList.add("active");
 
-  if(screenId === "s-matching") loadMatches();
+  if(screenId === "s-matching") loadMatches(); loadQuiz();
   if(screenId === "s-community") renderCommunity();
   if(screenId === "s-profile") renderProfile();
 }
 
 // ---- REGISTER ----
 async function register() {
-  const alias = document.getElementById("alias").value.trim() || "Anoniem";
+  const alias = document.getElementById("alias").value.trim();
+  if (!alias) { nextTo("s-welcome"); return; }
   const energie = document.getElementById("energie").value;
   const geluid = document.getElementById("geluid").checked;
   const drukte = document.getElementById("drukte").checked;
@@ -598,7 +627,31 @@ async function loginWithCode() {
 }
 
 // ---- MATCHES ----
-async function loadMatches() {
+async function loadQuiz() {
+    if (!myId) return;
+      const res = await fetch("/api/quiz/today?userId=" + myId);
+        const data = await res.json();
+          const q = (data.questions || []).find(x => !x.answered) || (data.questions || [])[0];
+            const qEl = document.getElementById("quizQuestion");
+              const optsEl = document.getElementById("quizOptions");
+                if (!q) {
+                  qEl.innerText = "Geen vraag beschikbaar vandaag.";
+                    optsEl.innerHTML = "";
+                      return;
+                        }
+                          qEl.innerText = q.text;
+                            optsEl.innerHTML = q.options.map((opt, i) => '<button class="quiz-opt" data-i="' + i + '">' + escapeHtml(opt) + '</button>').join("");
+                              optsEl.querySelectorAll(".quiz-opt").forEach(btn => {
+                                btn.addEventListener("click", async () => {
+                                  optsEl.querySelectorAll(".quiz-opt").forEach(b => b.classList.remove("picked"));
+                                    btn.classList.add("picked");
+                                      await fetch("/api/quiz/answer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId: myId, questionId: q.id, choiceIndex: Number(btn.dataset.i) }) });
+                                        document.getElementById("quizHelper").innerText = "Bedankt! Kom morgen terug voor een nieuwe vraag.";
+                                          });
+                                            });
+                                            }
+                                            
+                                            async function loadMatches() {
   if (!myId) return;
   const res = await fetch("/api/matches/" + myId);
   const matches = await res.json();
@@ -625,10 +678,12 @@ async function loadMatches() {
 }
 
 // ---- CHAT ----
-function openChat(roomId, partnerAlias) {
-  currentRoom = roomId;
-  document.getElementById("chatPartnerName").innerText = partnerAlias;
-  document.getElementById("chatMessages").innerHTML = "";
+function openChat(roomId, partnerAlias, reason) {
+    currentRoom = roomId;
+      document.getElementById("chatPartnerName").innerText = partnerAlias;
+        document.getElementById("chatAvatar").innerText = (partnerAlias || "?").charAt(0).toUpperCase();
+          document.getElementById("chatReason").innerText = reason || "";
+document.getElementById("chatMessages").innerHTML = "";
   document.getElementById("nvcBanner").style.display = "none";
   showScreen("s-chat");
   socket.emit("join", { roomId: currentRoom, userId: myId });
@@ -685,7 +740,7 @@ async function addCommunityPost() {
   await fetch("/api/community", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ alias: profile.alias || "Anoniem", text: txt })
+    body: JSON.stringify({ alias: profile.alias, text: txt })
   });
   input.value = "";
   renderCommunity();
@@ -712,13 +767,7 @@ async function renderCommunity() {
 function renderProfile() {
   const p = JSON.parse(localStorage.getItem("nd_profile") || "{}");
   document.getElementById("profileCard").innerHTML = \`
-    <div class="section-label">Jouw gegevens</div>
-    <div class="tile"><strong>Alias:</strong> \${escapeHtml(p.alias || "Anoniem")}</div>
-    <div class="tile"><strong>Energie:</strong> \${escapeHtml(p.energie || "—")}</div>
-    <div class="tile"><strong>Geluidsgevoelig:</strong> \${p.geluid ? "Ja" : "Nee"}</div>
-    <div class="tile"><strong>Druktegevoel:</strong> \${p.drukte ? "Ja" : "Nee"}</div>
-    \${p.communicatie ? \`<div class="tile"><strong>Communicatie:</strong><br>\${escapeHtml(p.communicatie)}</div>\` : ""}
-    <div class="tile"><strong>Open voor romantiek via community:</strong> \${p.openVoorRomantiek ? "Ja" : "Nee"}</div>
+    <div style="display:flex;align-items:center;gap:14px"><div class="avatar avatar-lg">\${escapeHtml((p.alias||"?").charAt(0).toUpperCase())}</div><div><strong style="font-size:19px">\${escapeHtml(p.alias || "Anoniem")}</strong>\${p.openVoorRomantiek ? '<div class="badge" style="margin-top:6px;display:inline-block">Open voor romantiek</div>' : ""}</div></div><div style="border-top:1px solid var(--card-border);margin:18px 0"></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span>Energietempo</span><strong>\${escapeHtml(p.energie || "—")}</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span>Geluidsgevoelig</span><strong>\${p.geluid ? "Ja" : "Nee"}</strong></div><div style="display:flex;justify-content:space-between;padding:6px 0"><span>Druktegevoel</span><strong>\${p.drukte ? "Ja" : "Nee"}</strong></div>\${p.communicatie ? '<div style="border-top:1px solid var(--card-border);margin:14px 0"></div><div class="section-label" style="margin-bottom:6px">Communicatie</div><p style="margin:0">' + escapeHtml(p.communicatie) + '</p>' : ""}
   \`;
 }
 
@@ -741,4 +790,16 @@ if (savedId && savedProfile) {
 </html>`);
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log("ND Connection draait op poort", PORT));
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: "Serverfout" });
+});
+
+db.ready
+  .then(() => {
+    server.listen(PORT, "0.0.0.0", () => console.log("ND Connection draait op poort", PORT));
+  })
+  .catch((err) => {
+    console.error("Kon database niet initialiseren:", err);
+    process.exit(1);
+  });

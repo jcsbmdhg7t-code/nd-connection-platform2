@@ -264,7 +264,7 @@ app.get("/", (req, res) => {
 <script src="/socket.io/socket.io.js"><\/script>
 <style>
 :root{
-  --blue:#0b3c49; --green:#0f5c4b; --sea:#6fc3b2;
+  --blue:#16225c; --green:#3355e8; --sea:#7a93e0;
   --naples:#f2d98d; --orange:#c96b3c; --ochre:#c9a24d;
   --glass:rgba(255,255,255,.08); --border:rgba(255,255,255,.16);
   --text:#eef7f5; --muted:#b9d6cf;

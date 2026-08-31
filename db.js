@@ -4,8 +4,23 @@
 // te schrijven, zodat data blijft bestaan als de host herstart of in slaap gaat.
 const { createClient } = require("@libsql/client");
 
+const url = process.env.TURSO_DATABASE_URL || "file:nd-connection.db";
+
+// Een libsql://-adres is de blijvende Turso-database; een file:-adres is een bestand
+// in de container, dat bij elke herstart weg is. Dat verschil moet zichtbaar zijn,
+// anders lijkt alles goed te gaan terwijl gegevens stilletjes verdwijnen.
+const isRemote = url.startsWith("libsql://") || url.startsWith("https://");
+
+const storage = {
+  remote: isRemote,
+  mode: isRemote ? "turso" : "tijdelijk-bestand",
+  // Alleen de hostnaam, nooit het token.
+  host: isRemote ? url.replace(/^\w+:\/\//, "").split("/")[0] : url,
+  hasToken: Boolean(process.env.TURSO_AUTH_TOKEN),
+};
+
 const client = createClient({
-  url: process.env.TURSO_DATABASE_URL || "file:nd-connection.db",
+  url,
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
@@ -118,6 +133,11 @@ async function getOtherUsers(id) {
   return result.rows.map(rowToUser);
 }
 
+async function countUsers() {
+  const result = await client.execute("SELECT COUNT(*) AS n FROM users");
+  return result.rows[0].n;
+}
+
 async function deleteUser(id) {
   await client.batch([
     { sql: "DELETE FROM quiz_answers WHERE user_id = ?", args: [id] },
@@ -228,10 +248,12 @@ async function getOtherAnswersForRound(userId, roundDate) {
 
 module.exports = {
   ready,
+  storage,
   createUser,
   getUser,
   getOtherUsers,
   deleteUser,
+  countUsers,
   addMessage,
   getMessages,
   addReport,

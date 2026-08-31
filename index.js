@@ -73,6 +73,17 @@ function nvcCheck(text) {
 }
 
 /* ---- API ROUTES ---- */
+// Laat zien of de app op de blijvende database draait of op een tijdelijk bestand.
+// Bevat nooit het token — alleen de hostnaam en of er een token is meegegeven.
+app.get("/api/health", async (req, res) => {
+  try {
+    const users = await db.countUsers();
+    res.json({ ok: true, opslag: db.storage.mode, host: db.storage.host, tokenAanwezig: db.storage.hasToken, accounts: users });
+  } catch (err) {
+    res.status(500).json({ ok: false, opslag: db.storage.mode, host: db.storage.host, fout: String(err && err.message) });
+  }
+});
+
 app.post("/api/register", registerLimiter, async (req, res, next) => {
   try {
     const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
@@ -306,6 +317,16 @@ app.use((err, req, res, next) => {
 
 db.ready
   .then(() => {
+    if (db.storage.remote) {
+      console.log("Opslag: Turso (" + db.storage.host + ") — gegevens blijven bewaard.");
+    } else {
+      console.warn(
+        "LET OP — Opslag: tijdelijk bestand in de container (" + db.storage.host + ").\n" +
+        "Alle accounts en berichten zijn weg bij de eerstvolgende herstart.\n" +
+        "Zet TURSO_DATABASE_URL en TURSO_AUTH_TOKEN om dit te verhelpen." +
+        (db.storage.hasToken ? "\n(TURSO_AUTH_TOKEN is wél gezet, TURSO_DATABASE_URL niet.)" : "")
+      );
+    }
     server.listen(PORT, "0.0.0.0", () => console.log("ND Connection draait op poort", PORT));
   })
   .catch((err) => {

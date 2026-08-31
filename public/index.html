@@ -182,6 +182,31 @@ button.danger{background:var(--danger);color:white}
 .chat-input-area input{margin:0;border-radius:999px;padding:12px 18px}
 .chat-input-area button{width:auto;margin:0;padding:12px 18px;border-radius:999px}
 
+/* ---- QUIZ ---- */
+.eyebrow{
+  display:inline-block; background:var(--accent); color:#1B2430;
+  font-size:11.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  padding:5px 12px; border-radius:999px; margin-bottom:14px;
+}
+.quiz-card{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:20px; padding:24px; margin-bottom:16px;
+}
+.quiz-q{margin:0 0 18px;font-size:16.5px;line-height:1.55;color:var(--text);font-weight:600}
+.opts{display:flex;flex-direction:column;gap:10px}
+.opt{
+  width:100%; margin:0; padding:14px 16px;
+  border-radius:14px; border:1.5px solid var(--border);
+  background:var(--card); color:var(--text);
+  font-family:inherit; font-size:14.5px; font-weight:400; text-align:left;
+  cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:10px;
+  transition:border-color .15s, background .15s;
+}
+.opt:hover{border-color:var(--primary);opacity:1}
+.opt.selected{border-color:var(--primary);background:rgba(65,105,225,.07);font-weight:700}
+.opt svg{width:18px;height:18px;flex-shrink:0}
+.quiz-hint{margin:0;font-size:13.5px;line-height:1.6;color:#8A8175;font-style:italic}
+
 /* ---- MISC ---- */
 .section-label{font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
 .rule{padding:10px 14px;border-radius:12px;background:var(--bg);border:1px solid var(--border);margin-bottom:8px;font-size:14px}
@@ -230,7 +255,7 @@ button.danger{background:var(--danger);color:white}
     <p>Dit is je enige toegang tot je account — er is geen e-mail of wachtwoord. Bewaar 'm ergens veilig, dan kun je altijd terug, ook op een ander apparaat.</p>
     <input id="savecodeValue" readonly>
     <button class="sec" onclick="copySavecode()">Kopieer code</button>
-    <button onclick="showScreen('s-matching')">Ik heb 'm bewaard, verder →</button>
+    <button onclick="showScreen('s-quiz')">Ik heb 'm bewaard, verder →</button>
   </div>
 </div>
 
@@ -263,6 +288,13 @@ button.danger{background:var(--danger);color:white}
 </div>
 
 <!-- MAIN APP -->
+<div class="screen" id="s-quiz">
+  <div class="eyebrow">Vandaag 20:00&ndash;21:00</div>
+  <h2 style="font-size:27px;line-height:1.28;margin-bottom:20px">Eén goed moment per dag, geen <span style="color:var(--primary)">eindeloze feed.</span></h2>
+  <div id="quizQuestions"></div>
+  <div id="quizMatches" style="margin-top:12px"></div>
+</div>
+
 <div class="screen" id="s-matching">
   <h2 style="margin-bottom:0">Zachte matching</h2>
   <p>Op basis van jouw profiel — klik om te chatten.</p>
@@ -312,7 +344,14 @@ button.danger{background:var(--danger);color:white}
 
 <!-- BOTTOM NAV -->
 <div class="bottom-nav" id="bottomNav">
-  <button class="nav-btn active" id="nav-matching" onclick="showScreen('s-matching')">
+  <button class="nav-btn active" id="nav-quiz" onclick="showScreen('s-quiz')">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="4.2"/>
+      <path d="M12 2.6v2.2M12 19.2v2.2M2.6 12h2.2M19.2 12h2.2M5.4 5.4l1.5 1.5M17.1 17.1l1.5 1.5M18.6 5.4l-1.5 1.5M6.9 17.1l-1.5 1.5"/>
+    </svg>
+    Vandaag
+  </button>
+  <button class="nav-btn" id="nav-matching" onclick="showScreen('s-matching')">
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 12c2-5 5-7 9-7s7 2 9 7c-2 5-5 7-9 7s-7-2-9-7z"/>
       <circle class="dot" cx="12" cy="12" r="2.4"/>
@@ -369,13 +408,14 @@ function showScreen(screenId) {
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
   document.getElementById(screenId).classList.add("active");
 
-  const navScreens = ["s-matching", "s-community", "s-profile"];
+  const navScreens = ["s-quiz", "s-matching", "s-community", "s-profile"];
   document.getElementById("bottomNav").classList.toggle("visible", navScreens.includes(screenId));
 
   document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
-  const navMap = {"s-matching":"nav-matching","s-community":"nav-community","s-profile":"nav-profile"};
+  const navMap = {"s-quiz":"nav-quiz","s-matching":"nav-matching","s-community":"nav-community","s-profile":"nav-profile"};
   if(navMap[screenId]) document.getElementById(navMap[screenId]).classList.add("active");
 
+  if(screenId === "s-quiz") loadQuiz();
   if(screenId === "s-matching") loadMatches();
   if(screenId === "s-community") renderCommunity();
   if(screenId === "s-profile") renderProfile();
@@ -433,7 +473,87 @@ async function loginWithCode() {
     communicatie: user.communicatie,
     openVoorRomantiek: user.openVoorRomantiek,
   }));
-  showScreen("s-matching");
+  showScreen("s-quiz");
+}
+
+// ---- DAGELIJKSE QUIZ ----
+const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+  '<circle cx="12" cy="12" r="9" style="fill:var(--primary)"/>' +
+  '<path d="M8 12.5l2.5 2.5L16 9" stroke="#FAF7F2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+async function loadQuiz() {
+  if (!myId) return;
+  const res = await fetch("/api/quiz/today?userId=" + encodeURIComponent(myId));
+  const data = await res.json();
+  const el = document.getElementById("quizQuestions");
+
+  el.innerHTML = data.questions.map((q) => `
+    <div class="quiz-card">
+      <p class="quiz-q">${escapeHtml(q.text)}</p>
+      <div class="opts">
+        ${q.options.map((opt, i) => `
+          <button class="opt" data-qid="${q.id}" data-choice="${i}">
+            <span>${escapeHtml(opt)}</span>
+          </button>`).join("")}
+      </div>
+    </div>`).join("");
+
+  el.querySelectorAll(".opt").forEach((btn) => {
+    btn.addEventListener("click", () => answerQuiz(Number(btn.dataset.qid), Number(btn.dataset.choice)));
+  });
+
+  loadQuizMatches();
+}
+
+async function answerQuiz(questionId, choiceIndex) {
+  await fetch("/api/quiz/answer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId: myId, questionId, choiceIndex })
+  });
+
+  document.querySelectorAll('.opt[data-qid="' + questionId + '"]').forEach((btn) => {
+    const chosen = Number(btn.dataset.choice) === choiceIndex;
+    btn.classList.toggle("selected", chosen);
+    const mark = btn.querySelector("svg");
+    if (mark) mark.remove();
+    if (chosen) btn.insertAdjacentHTML("beforeend", CHECK_SVG);
+  });
+
+  loadQuizMatches();
+}
+
+async function loadQuizMatches() {
+  const el = document.getElementById("quizMatches");
+  const res = await fetch("/api/quiz/matches/" + encodeURIComponent(myId));
+  const data = await res.json();
+
+  if (!data.matches || data.matches.length === 0) {
+    el.innerHTML = '<p class="quiz-hint">Beantwoord de vraag om je matches van vandaag te zien.</p>';
+    return;
+  }
+
+  el.innerHTML = '<div class="section-label">Matches van vandaag &middot; ' + data.matches.length + '</div>' +
+    data.matches.map((m) => {
+      const initial = (m.alias || "?").trim().charAt(0).toUpperCase();
+      const matchedOn = (m.matchedOn && m.matchedOn[0])
+        ? 'Jullie matchten op: <em style="font-style:normal;color:#4A453F">&ldquo;' + escapeHtml(m.matchedOn[0]) + '&rdquo;</em>'
+        : '';
+      return `<div class="tile match-tile" data-room="${escapeHtml(m.roomId)}" data-alias="${escapeHtml(m.alias)}" style="display:flex;gap:14px;align-items:flex-start">
+        <div class="avatar" style="width:44px;height:44px;font-size:18px">${escapeHtml(initial)}</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px">
+            <strong>${escapeHtml(m.alias)}</strong>
+            <span class="badge" style="margin-top:0">${m.overlap}/${m.shared} overlap</span>
+          </div>
+          <p class="small" style="margin:0;font-size:13px">${matchedOn}</p>
+        </div>
+      </div>`;
+    }).join("");
+
+  el.querySelectorAll(".match-tile").forEach((tile) => {
+    tile.addEventListener("click", () => openChat(tile.dataset.room, tile.dataset.alias));
+  });
 }
 
 // ---- MATCHES ----
@@ -585,7 +705,7 @@ const savedId = localStorage.getItem("nd_id");
 const savedProfile = localStorage.getItem("nd_profile");
 if (savedId && savedProfile) {
   myId = savedId;
-  showScreen("s-matching");
+  showScreen("s-quiz");
 }
 </script>
 </body>

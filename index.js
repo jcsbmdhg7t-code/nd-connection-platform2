@@ -74,13 +74,18 @@ function nvcCheck(text) {
 app.post("/api/register", registerLimiter, (req, res) => {
   const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
 
+  const cleanAlias = cleanString(alias, 40);
+  if (!cleanAlias) {
+    return res.status(400).json({ error: "Naam is verplicht" });
+  }
+
   if (energie !== undefined && !ENERGIE_OPTIONS.includes(energie)) {
     return res.status(400).json({ error: "Ongeldige waarde voor energie" });
   }
 
   const id = genId();
   const user = db.createUser(id, {
-    alias: cleanString(alias, 40) || "Anoniem",
+    alias: cleanAlias,
     energie,
     geluid: geluid === "true",
     drukte: drukte === "true",

@@ -112,23 +112,32 @@ button.danger{background:var(--danger);color:white}
 
 /* ---- BOTTOM NAV ---- */
 .bottom-nav{
-  position:fixed; bottom:0; left:0; right:0;
-  background:rgba(255,255,255,.95); backdrop-filter:blur(14px);
+  position:fixed; bottom:0; left:50%; transform:translateX(-50%);
+  width:100%; max-width:480px;
+  background:rgba(255,255,255,.96); backdrop-filter:blur(16px);
   border-top:1px solid var(--border);
+  border-radius:22px 22px 0 0;
+  box-shadow:0 -6px 24px rgba(27,36,48,.07);
   display:none; justify-content:space-around; align-items:center;
-  padding:10px 0 max(10px, env(safe-area-inset-bottom));
+  padding:10px 8px max(10px, env(safe-area-inset-bottom));
   z-index:100;
 }
 .bottom-nav.visible{display:flex}
 .nav-btn{
-  display:flex;flex-direction:column;align-items:center;gap:4px;
-  cursor:pointer; padding:6px 16px; border-radius:14px;
-  color:var(--muted); font-size:11px; border:none;
+  display:flex;flex-direction:column;align-items:center;gap:5px;
+  cursor:pointer; padding:8px 18px; border-radius:16px;
+  color:var(--muted); font-size:11px; font-weight:600; border:none;
   background:transparent; font-family:inherit;
-  transition:color .15s;
+  transition:color .15s, background .15s;
 }
-.nav-btn.active,.nav-btn:hover{color:var(--primary)}
-.nav-btn span{font-size:22px}
+.nav-btn svg{
+  width:24px; height:24px;
+  fill:none; stroke:currentColor; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round;
+}
+.nav-btn svg .dot{fill:currentColor;stroke:none}
+.nav-btn.active{color:var(--primary);background:rgba(65,105,225,.10)}
+.nav-btn:hover{color:var(--primary)}
 
 /* ---- TILES ---- */
 .tile{
@@ -231,9 +240,9 @@ button.danger{background:var(--danger);color:white}
     <p>Dit helpt ons om je de juiste matches te tonen.</p>
     <label>Energietempo</label>
     <select id="energie">
-      <option value="laag">🌊 Laag & rustig</option>
-      <option value="gemiddeld" selected>🌿 Gemiddeld</option>
-      <option value="hoog">✨ Hoog</option>
+      <option value="laag">Laag &amp; rustig</option>
+      <option value="gemiddeld" selected>Gemiddeld</option>
+      <option value="hoog">Hoog</option>
     </select>
     <div class="checkbox"><input type="checkbox" id="geluid"><label for="geluid">Gevoelig voor veel geluid</label></div>
     <div class="checkbox"><input type="checkbox" id="drukte"><label for="drukte">Gevoelig voor drukte</label></div>
@@ -303,9 +312,29 @@ button.danger{background:var(--danger);color:white}
 
 <!-- BOTTOM NAV -->
 <div class="bottom-nav" id="bottomNav">
-  <button class="nav-btn active" id="nav-matching" onclick="showScreen('s-matching')"><span>🌊</span>Matches</button>
-  <button class="nav-btn" id="nav-community" onclick="showScreen('s-community')"><span>🌿</span>Community</button>
-  <button class="nav-btn" id="nav-profile" onclick="showScreen('s-profile')"><span>👤</span>Profiel</button>
+  <button class="nav-btn active" id="nav-matching" onclick="showScreen('s-matching')">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 12c2-5 5-7 9-7s7 2 9 7c-2 5-5 7-9 7s-7-2-9-7z"/>
+      <circle class="dot" cx="12" cy="12" r="2.4"/>
+    </svg>
+    Matches
+  </button>
+  <button class="nav-btn" id="nav-community" onclick="showScreen('s-community')">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="9" cy="8.5" r="3.1"/>
+      <path d="M3.2 19.2c0-3.2 2.6-5.4 5.8-5.4s5.8 2.2 5.8 5.4"/>
+      <path d="M16.4 6.6a3 3 0 0 1 0 5.6"/>
+      <path d="M17.6 14.1c1.9.6 3.2 2.3 3.2 4.4"/>
+    </svg>
+    Community
+  </button>
+  <button class="nav-btn" id="nav-profile" onclick="showScreen('s-profile')">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="8" r="3.4"/>
+      <path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6"/>
+    </svg>
+    Profiel
+  </button>
 </div>
 
 <script>

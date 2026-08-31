@@ -67,7 +67,7 @@ function nvcCheck(text) {
   const triggers = ["jij altijd", "nooit", "dom", "stom", "irritant", "idiot", "waardeloos"];
   const found = triggers.filter(w => text.toLowerCase().includes(w));
   if (found.length > 0) {
-    return "💛 NVC-tip: Probeer je gevoel te benoemen in plaats van een oordeel. Bijv. 'Ik voel me gefrustreerd omdat...'";
+    return "NVC-tip: Probeer je gevoel te benoemen in plaats van een oordeel. Bijv. 'Ik voel me gefrustreerd omdat...'";
   }
   return null;
 }

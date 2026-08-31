@@ -50,12 +50,13 @@ function matchScore(a, b) {
   return score;
 }
 
-function getMatches(userId) {
-  const me = db.getUser(userId);
+async function getMatches(userId) {
+  const me = await db.getUser(userId);
   if (!me) return [];
   // Geen ruwe account-ID's van anderen teruggeven — dat is sinds de herstelcode-login
   // hun volledige accounttoegang. Een roomId is voldoende om te kunnen chatten.
-  return db.getOtherUsers(userId)
+  const others = await db.getOtherUsers(userId);
+  return others
     .map((u) => ({ roomId: roomIdFor(userId, u.id), alias: u.alias, energie: u.energie, score: matchScore(me, u) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 5);
@@ -71,144 +72,168 @@ function nvcCheck(text) {
 }
 
 /* ---- API ROUTES ---- */
-app.post("/api/register", registerLimiter, (req, res) => {
-  const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
+app.post("/api/register", registerLimiter, async (req, res, next) => {
+  try {
+    const { alias, energie, geluid, drukte, communicatie, openVoorRomantiek } = req.body;
 
-  const cleanAlias = cleanString(alias, 40);
-  if (!cleanAlias) {
-    return res.status(400).json({ error: "Naam is verplicht" });
-  }
+    const cleanAlias = cleanString(alias, 40);
+    if (!cleanAlias) {
+      return res.status(400).json({ error: "Naam is verplicht" });
+    }
 
-  if (energie !== undefined && !ENERGIE_OPTIONS.includes(energie)) {
-    return res.status(400).json({ error: "Ongeldige waarde voor energie" });
-  }
+    if (energie !== undefined && !ENERGIE_OPTIONS.includes(energie)) {
+      return res.status(400).json({ error: "Ongeldige waarde voor energie" });
+    }
 
-  const id = genId();
-  const user = db.createUser(id, {
-    alias: cleanAlias,
-    energie,
-    geluid: geluid === "true",
-    drukte: drukte === "true",
-    communicatie: cleanString(communicatie, 1000),
-    openVoorRomantiek: openVoorRomantiek === "true",
-  });
-  res.json({ id, alias: user.alias });
+    const id = genId();
+    const user = await db.createUser(id, {
+      alias: cleanAlias,
+      energie,
+      geluid: geluid === "true",
+      drukte: drukte === "true",
+      communicatie: cleanString(communicatie, 1000),
+      openVoorRomantiek: openVoorRomantiek === "true",
+    });
+    res.json({ id, alias: user.alias });
+  } catch (err) { next(err); }
 });
 
-app.get("/api/matches/:userId", (req, res) => {
-  res.json(getMatches(req.params.userId));
+app.get("/api/matches/:userId", async (req, res, next) => {
+  try {
+    res.json(await getMatches(req.params.userId));
+  } catch (err) { next(err); }
 });
 
 // Herstel-login: je account-ID is je enige toegangscode (geen e-mail/wachtwoord nodig).
-app.get("/api/users/:id", (req, res) => {
-  const user = db.getUser(req.params.id);
-  if (!user) return res.status(404).json({ error: "Onbekende code" });
-  res.json(user);
+app.get("/api/users/:id", async (req, res, next) => {
+  try {
+    const user = await db.getUser(req.params.id);
+    if (!user) return res.status(404).json({ error: "Onbekende code" });
+    res.json(user);
+  } catch (err) { next(err); }
 });
 
-app.get("/api/messages/:roomId", (req, res) => {
-  res.json(db.getMessages(req.params.roomId));
+app.get("/api/messages/:roomId", async (req, res, next) => {
+  try {
+    res.json(await db.getMessages(req.params.roomId));
+  } catch (err) { next(err); }
 });
 
-app.post("/api/report", (req, res) => {
-  const payload = JSON.stringify(req.body || {});
-  if (payload.length > 5000) return res.status(400).json({ error: "Melding is te lang" });
-  db.addReport(req.body);
-  res.json({ ok: true });
+app.post("/api/report", async (req, res, next) => {
+  try {
+    const payload = JSON.stringify(req.body || {});
+    if (payload.length > 5000) return res.status(400).json({ error: "Melding is te lang" });
+    await db.addReport(req.body);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
-app.get("/api/community", (req, res) => {
-  res.json(db.getCommunityPosts());
+app.get("/api/community", async (req, res, next) => {
+  try {
+    res.json(await db.getCommunityPosts());
+  } catch (err) { next(err); }
 });
 
-app.post("/api/community", (req, res) => {
-  const { alias, text } = req.body;
-  const trimmed = cleanString(text, 500);
-  if (!trimmed) return res.status(400).json({ error: "text is verplicht (max 500 tekens)" });
-  const time = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
-  db.addCommunityPost(cleanString(alias, 40) || "Anoniem", trimmed, time);
-  res.json({ ok: true });
+app.post("/api/community", async (req, res, next) => {
+  try {
+    const { alias, text } = req.body;
+    const trimmed = cleanString(text, 500);
+    if (!trimmed) return res.status(400).json({ error: "text is verplicht (max 500 tekens)" });
+    const cleanAlias = cleanString(alias, 40);
+    if (!cleanAlias) return res.status(400).json({ error: "Naam is verplicht" });
+    const time = new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+    await db.addCommunityPost(cleanAlias, trimmed, time);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
 });
 
 /* ---- DAGELIJKSE QUIZ (matching, geen swipen) ---- */
 function today() { return new Date().toISOString().slice(0, 10); }
 
-app.get("/api/quiz/today", (req, res) => {
-  const { userId } = req.query;
-  const date = today();
-  const questions = db.getQuizQuestionsForDate(date, 5);
-  const answered = userId
-    ? new Set(db.getUserAnswersForRound(userId, date).map((a) => a.questionId))
-    : new Set();
-  res.json({
-    date,
-    questions: questions.map((q) => ({ ...q, answered: answered.has(q.id) })),
-  });
+app.get("/api/quiz/today", async (req, res, next) => {
+  try {
+    const { userId } = req.query;
+    const date = today();
+    const questions = await db.getQuizQuestionsForDate(date, 5);
+    const answered = userId
+      ? new Set((await db.getUserAnswersForRound(userId, date)).map((a) => a.questionId))
+      : new Set();
+    res.json({
+      date,
+      questions: questions.map((q) => ({ ...q, answered: answered.has(q.id) })),
+    });
+  } catch (err) { next(err); }
 });
 
-app.post("/api/quiz/answer", (req, res) => {
-  const { userId, questionId, choiceIndex } = req.body;
-  if (!userId || questionId === undefined || choiceIndex === undefined) {
-    return res.status(400).json({ error: "userId, questionId en choiceIndex zijn verplicht" });
-  }
-  if (!db.getUser(userId)) {
-    return res.status(404).json({ error: "Onbekend account" });
-  }
-
-  const date = today();
-  const todaysQuestion = db.getQuizQuestionsForDate(date, 5).find((q) => q.id === questionId);
-  if (!todaysQuestion) {
-    return res.status(400).json({ error: "Deze vraag hoort niet bij de quiz van vandaag" });
-  }
-  if (!Number.isInteger(choiceIndex) || choiceIndex < 0 || choiceIndex >= todaysQuestion.options.length) {
-    return res.status(400).json({ error: "Ongeldige keuze" });
-  }
-
-  db.saveQuizAnswer(userId, questionId, date, choiceIndex);
-  res.json({ ok: true });
-});
-
-app.get("/api/quiz/matches/:userId", (req, res) => {
-  const date = today();
-  const userId = req.params.userId;
-  const myAnswers = db.getUserAnswersForRound(userId, date);
-  if (myAnswers.length === 0) return res.json({ date, matches: [], reason: "nog niet meegedaan vandaag" });
-
-  const myMap = new Map(myAnswers.map((a) => [a.questionId, a.choiceIndex]));
-  const others = db.getOtherAnswersForRound(userId, date);
-
-  const perUser = new Map();
-  for (const a of others) {
-    if (!myMap.has(a.questionId)) continue;
-    if (!perUser.has(a.userId)) perUser.set(a.userId, { shared: 0, overlap: 0, questionIds: [] });
-    const entry = perUser.get(a.userId);
-    entry.shared += 1;
-    if (myMap.get(a.questionId) === a.choiceIndex) {
-      entry.overlap += 1;
-      entry.questionIds.push(a.questionId);
+app.post("/api/quiz/answer", async (req, res, next) => {
+  try {
+    const { userId, questionId, choiceIndex } = req.body;
+    if (!userId || questionId === undefined || choiceIndex === undefined) {
+      return res.status(400).json({ error: "userId, questionId en choiceIndex zijn verplicht" });
     }
-  }
+    if (!(await db.getUser(userId))) {
+      return res.status(404).json({ error: "Onbekend account" });
+    }
 
-  const questionsById = new Map(
-    db.getQuizQuestionsForDate(date, 5).map((q) => [q.id, q])
-  );
+    const date = today();
+    const todaysQuestion = (await db.getQuizQuestionsForDate(date, 5)).find((q) => q.id === questionId);
+    if (!todaysQuestion) {
+      return res.status(400).json({ error: "Deze vraag hoort niet bij de quiz van vandaag" });
+    }
+    if (!Number.isInteger(choiceIndex) || choiceIndex < 0 || choiceIndex >= todaysQuestion.options.length) {
+      return res.status(400).json({ error: "Ongeldige keuze" });
+    }
 
-  const matches = [...perUser.entries()]
-    .filter(([, v]) => v.shared > 0)
-    .map(([otherId, v]) => {
-      const user = db.getUser(otherId);
-      return {
-        roomId: roomIdFor(userId, otherId),
-        alias: user ? user.alias : "Onbekend",
-        overlap: v.overlap,
-        shared: v.shared,
-        matchedOn: v.questionIds.map((qid) => questionsById.get(qid)?.text).filter(Boolean),
-      };
-    })
-    .sort((a, b) => b.overlap - a.overlap)
-    .slice(0, 10);
+    await db.saveQuizAnswer(userId, questionId, date, choiceIndex);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
 
-  res.json({ date, matches });
+app.get("/api/quiz/matches/:userId", async (req, res, next) => {
+  try {
+    const date = today();
+    const userId = req.params.userId;
+    const myAnswers = await db.getUserAnswersForRound(userId, date);
+    if (myAnswers.length === 0) return res.json({ date, matches: [], reason: "nog niet meegedaan vandaag" });
+
+    const myMap = new Map(myAnswers.map((a) => [a.questionId, a.choiceIndex]));
+    const others = await db.getOtherAnswersForRound(userId, date);
+
+    const perUser = new Map();
+    for (const a of others) {
+      if (!myMap.has(a.questionId)) continue;
+      if (!perUser.has(a.userId)) perUser.set(a.userId, { shared: 0, overlap: 0, questionIds: [] });
+      const entry = perUser.get(a.userId);
+      entry.shared += 1;
+      if (myMap.get(a.questionId) === a.choiceIndex) {
+        entry.overlap += 1;
+        entry.questionIds.push(a.questionId);
+      }
+    }
+
+    const questionsById = new Map(
+      (await db.getQuizQuestionsForDate(date, 5)).map((q) => [q.id, q])
+    );
+
+    const matches = (await Promise.all(
+      [...perUser.entries()]
+        .filter(([, v]) => v.shared > 0)
+        .map(async ([otherId, v]) => {
+          const user = await db.getUser(otherId);
+          return {
+            roomId: roomIdFor(userId, otherId),
+            alias: user ? user.alias : "Onbekend",
+            overlap: v.overlap,
+            shared: v.shared,
+            matchedOn: v.questionIds.map((qid) => questionsById.get(qid)?.text).filter(Boolean),
+          };
+        })
+    ))
+      .sort((a, b) => b.overlap - a.overlap)
+      .slice(0, 10);
+
+    res.json({ date, matches });
+  } catch (err) { next(err); }
 });
 
 /* ---- SOCKET.IO CHAT ---- */
@@ -226,13 +251,13 @@ function isParticipant(roomId, userId) {
 io.on("connection", (socket) => {
   let messageTimestamps = [];
 
-  socket.on("join", ({ roomId, userId } = {}) => {
-    if (!isParticipant(roomId, userId) || !db.getUser(userId)) return;
+  socket.on("join", async ({ roomId, userId } = {}) => {
+    if (!isParticipant(roomId, userId) || !(await db.getUser(userId))) return;
     socket.data.userId = userId;
     socket.join(roomId);
   });
 
-  socket.on("message", ({ roomId, text }) => {
+  socket.on("message", async ({ roomId, text }) => {
     const userId = socket.data.userId;
     if (!isParticipant(roomId, userId)) return;
     if (typeof text !== "string" || !text.trim()) return;
@@ -245,11 +270,12 @@ io.on("connection", (socket) => {
     const cleanText = text.trim().slice(0, 2000);
     // De afzendernaam komt van de server (via het geverifieerde userId), nooit
     // van de client — anders kan iemand zich voordoen als de ander in de room.
-    const sender = db.getUser(userId);
-    const fromAlias = sender ? sender.alias : "Anoniem";
+    const sender = await db.getUser(userId);
+    if (!sender) return;
+    const fromAlias = sender.alias;
 
     const msg = { userId, from: fromAlias, text: cleanText, time: new Date().toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" }) };
-    db.addMessage(roomId, userId, msg.from, msg.text, msg.time);
+    await db.addMessage(roomId, userId, msg.from, msg.text, msg.time);
 
     const tip = nvcCheck(cleanText);
     io.to(roomId).emit("message", msg);
@@ -405,9 +431,10 @@ button.danger{background:var(--danger);color:white}
   <div class="card" style="margin-top:auto;margin-bottom:auto">
     <h1>ND Connection</h1>
     <p>Een veilige plek voor neurodivergente verbinding. Rustig, vrijwillig, op jouw tempo.</p>
-    <label>Kies een alias (optioneel)</label>
-    <input id="alias" placeholder="Anoniem">
-    <button onclick="nextTo('s-energy')">Verder →</button>
+    <label>Je naam</label>
+    <input id="alias" placeholder="Voer je naam in">
+    <p class="small" style="margin:6px 0 0">We werken met echte namen. Dat houdt dit platform veilig en betrouwbaar — geen anonieme accounts.</p>
+    <button onclick="tryNextToEnergy()">Verder →</button>
     <button class="sec sm" onclick="nextTo('s-login')">Ik heb al een account</button>
   </div>
 </div>
@@ -532,6 +559,17 @@ function nextTo(screenId) {
   document.getElementById(screenId).classList.add("active");
 }
 
+function tryNextToEnergy() {
+  const aliasInput = document.getElementById("alias");
+  if (!aliasInput.value.trim()) {
+    aliasInput.style.borderColor = "var(--danger)";
+    aliasInput.focus();
+    return;
+  }
+  aliasInput.style.borderColor = "";
+  nextTo("s-energy");
+}
+
 function showScreen(screenId) {
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
   document.getElementById(screenId).classList.add("active");
@@ -550,7 +588,8 @@ function showScreen(screenId) {
 
 // ---- REGISTER ----
 async function register() {
-  const alias = document.getElementById("alias").value.trim() || "Anoniem";
+  const alias = document.getElementById("alias").value.trim();
+  if (!alias) { nextTo("s-welcome"); return; }
   const energie = document.getElementById("energie").value;
   const geluid = document.getElementById("geluid").checked;
   const drukte = document.getElementById("drukte").checked;
@@ -690,7 +729,7 @@ async function addCommunityPost() {
   await fetch("/api/community", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ alias: profile.alias || "Anoniem", text: txt })
+    body: JSON.stringify({ alias: profile.alias, text: txt })
   });
   input.value = "";
   renderCommunity();
@@ -746,4 +785,16 @@ if (savedId && savedProfile) {
 </html>`);
 });
 
-server.listen(PORT, "0.0.0.0", () => console.log("ND Connection draait op poort", PORT));
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: "Serverfout" });
+});
+
+db.ready
+  .then(() => {
+    server.listen(PORT, "0.0.0.0", () => console.log("ND Connection draait op poort", PORT));
+  })
+  .catch((err) => {
+    console.error("Kon database niet initialiseren:", err);
+    process.exit(1);
+  });

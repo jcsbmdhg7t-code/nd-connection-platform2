@@ -1,12 +1,16 @@
-// ===== ND CONNECTION — PERSISTENTE OPSLAG (SQLite) =====
-const path = require("path");
-const Database = require("better-sqlite3");
+// ===== ND CONNECTION — PERSISTENTE OPSLAG (libSQL / Turso) =====
+// Lokaal (geen env vars): schrijft naar een lokaal bestand nd-connection.db.
+// In productie: zet TURSO_DATABASE_URL en TURSO_AUTH_TOKEN om naar een Turso-database
+// te schrijven, zodat data blijft bestaan als de host herstart of in slaap gaat.
+const { createClient } = require("@libsql/client");
 
-const db = new Database(path.join(__dirname, "nd-connection.db"));
-db.pragma("journal_mode = WAL");
+const client = createClient({
+  url: process.env.TURSO_DATABASE_URL || "file:nd-connection.db",
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
+const SCHEMA_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     alias TEXT NOT NULL,
     energie TEXT,
@@ -15,9 +19,8 @@ db.exec(`
     communicatie TEXT,
     open_voor_romantiek INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
+  )`,
+  `CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     room_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -25,30 +28,26 @@ db.exec(`
     text TEXT NOT NULL,
     time TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id);
-
-  CREATE TABLE IF NOT EXISTS reports (
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id)`,
+  `CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     payload TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS community_posts (
+  )`,
+  `CREATE TABLE IF NOT EXISTS community_posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     alias TEXT NOT NULL,
     text TEXT NOT NULL,
     time TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS quiz_questions (
+  )`,
+  `CREATE TABLE IF NOT EXISTS quiz_questions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     text TEXT NOT NULL,
     options TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS quiz_answers (
+  )`,
+  `CREATE TABLE IF NOT EXISTS quiz_answers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
     question_id INTEGER NOT NULL,
@@ -56,9 +55,9 @@ db.exec(`
     choice_index INTEGER NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(user_id, question_id, round_date)
-  );
-  CREATE INDEX IF NOT EXISTS idx_quiz_answers_round ON quiz_answers(round_date);
-`);
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_quiz_answers_round ON quiz_answers(round_date)`,
+];
 
 /* ---- QUIZ VRAGENBANK (eenmalig seeden) ---- */
 const QUIZ_SEED = [
@@ -77,41 +76,46 @@ const QUIZ_SEED = [
   { text: "Wat zou jij het fijnst vinden aan een dagelijks contactmoment zoals dit?", options: ["Dat het voorspelbaar en begrensd is", "Dat het spannend blijft en niet te vaak is", "Dat ik zelf kan kiezen of ik meedoe, zonder druk"] },
 ];
 
-function seedQuizQuestions() {
-  const count = db.prepare("SELECT COUNT(*) AS n FROM quiz_questions").get().n;
-  if (count > 0) return;
-  const insert = db.prepare("INSERT INTO quiz_questions (text, options) VALUES (?, ?)");
-  const insertMany = db.transaction((questions) => {
-    for (const q of questions) insert.run(q.text, JSON.stringify(q.options));
-  });
-  insertMany(QUIZ_SEED);
+async function seedQuizQuestions() {
+  const result = await client.execute("SELECT COUNT(*) AS n FROM quiz_questions");
+  if (result.rows[0].n > 0) return;
+  await client.batch(
+    QUIZ_SEED.map((q) => ({
+      sql: "INSERT INTO quiz_questions (text, options) VALUES (?, ?)",
+      args: [q.text, JSON.stringify(q.options)],
+    })),
+    "write"
+  );
 }
-seedQuizQuestions();
+
+async function init() {
+  for (const sql of SCHEMA_STATEMENTS) {
+    await client.execute(sql);
+  }
+  await seedQuizQuestions();
+}
+
+const ready = init();
 
 /* ---- USERS ---- */
-function createUser(id, { alias, energie, geluid, drukte, communicatie, openVoorRomantiek }) {
-  db.prepare(`
-    INSERT INTO users (id, alias, energie, geluid, drukte, communicatie, open_voor_romantiek)
-    VALUES (@id, @alias, @energie, @geluid, @drukte, @communicatie, @openVoorRomantiek)
-  `).run({
-    id,
-    alias,
-    energie,
-    geluid: geluid ? 1 : 0,
-    drukte: drukte ? 1 : 0,
-    communicatie,
-    openVoorRomantiek: openVoorRomantiek ? 1 : 0,
+async function createUser(id, { alias, energie, geluid, drukte, communicatie, openVoorRomantiek }) {
+  await client.execute({
+    sql: `INSERT INTO users (id, alias, energie, geluid, drukte, communicatie, open_voor_romantiek)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [id, alias, energie ?? null, geluid ? 1 : 0, drukte ? 1 : 0, communicatie ?? null, openVoorRomantiek ? 1 : 0],
   });
   return getUser(id);
 }
 
-function getUser(id) {
-  const row = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
+async function getUser(id) {
+  const result = await client.execute({ sql: "SELECT * FROM users WHERE id = ?", args: [id] });
+  const row = result.rows[0];
   return row ? rowToUser(row) : null;
 }
 
-function getOtherUsers(id) {
-  return db.prepare("SELECT * FROM users WHERE id != ?").all(id).map(rowToUser);
+async function getOtherUsers(id) {
+  const result = await client.execute({ sql: "SELECT * FROM users WHERE id != ?", args: [id] });
+  return result.rows.map(rowToUser);
 }
 
 function rowToUser(row) {
@@ -127,34 +131,40 @@ function rowToUser(row) {
 }
 
 /* ---- MESSAGES ---- */
-function addMessage(roomId, userId, from, text, time) {
-  db.prepare(`
-    INSERT INTO messages (room_id, user_id, from_alias, text, time) VALUES (?, ?, ?, ?, ?)
-  `).run(roomId, userId, from, text, time);
+async function addMessage(roomId, userId, from, text, time) {
+  await client.execute({
+    sql: "INSERT INTO messages (room_id, user_id, from_alias, text, time) VALUES (?, ?, ?, ?, ?)",
+    args: [roomId, userId, from, text, time],
+  });
 }
 
-function getMessages(roomId) {
-  return db.prepare(`
-    SELECT user_id AS "userId", from_alias AS "from", text, time FROM messages WHERE room_id = ? ORDER BY id ASC
-  `).all(roomId);
+async function getMessages(roomId) {
+  const result = await client.execute({
+    sql: `SELECT user_id AS userId, from_alias AS "from", text, time FROM messages WHERE room_id = ? ORDER BY id ASC`,
+    args: [roomId],
+  });
+  return result.rows.map((r) => ({ userId: r.userId, from: r.from, text: r.text, time: r.time }));
 }
 
 /* ---- REPORTS ---- */
-function addReport(payload) {
-  db.prepare("INSERT INTO reports (payload) VALUES (?)").run(JSON.stringify(payload));
+async function addReport(payload) {
+  await client.execute({ sql: "INSERT INTO reports (payload) VALUES (?)", args: [JSON.stringify(payload)] });
 }
 
 /* ---- COMMUNITY POSTS ---- */
-function addCommunityPost(alias, text, time) {
-  db.prepare(`
-    INSERT INTO community_posts (alias, text, time) VALUES (?, ?, ?)
-  `).run(alias, text, time);
+async function addCommunityPost(alias, text, time) {
+  await client.execute({
+    sql: "INSERT INTO community_posts (alias, text, time) VALUES (?, ?, ?)",
+    args: [alias, text, time],
+  });
 }
 
-function getCommunityPosts(limit = 100) {
-  return db.prepare(`
-    SELECT alias, text, time FROM community_posts ORDER BY id DESC LIMIT ?
-  `).all(limit);
+async function getCommunityPosts(limit = 100) {
+  const result = await client.execute({
+    sql: "SELECT alias, text, time FROM community_posts ORDER BY id DESC LIMIT ?",
+    args: [limit],
+  });
+  return result.rows.map((r) => ({ alias: r.alias, text: r.text, time: r.time }));
 }
 
 /* ---- DAGELIJKSE QUIZ ---- */
@@ -168,8 +178,9 @@ function hashString(str) {
 
 // Iedereen krijgt dezelfde vragen op dezelfde datum — een gedeeld, dagelijks ritueel
 // i.p.v. willekeurige vragen per gebruiker.
-function getQuizQuestionsForDate(dateStr, count = 5) {
-  const all = db.prepare("SELECT id, text, options FROM quiz_questions ORDER BY id ASC").all();
+async function getQuizQuestionsForDate(dateStr, count = 5) {
+  const result = await client.execute("SELECT id, text, options FROM quiz_questions ORDER BY id ASC");
+  const all = result.rows;
   if (all.length === 0) return [];
   const offset = hashString(dateStr) % all.length;
   const picked = [];
@@ -180,29 +191,35 @@ function getQuizQuestionsForDate(dateStr, count = 5) {
   return picked;
 }
 
-function saveQuizAnswer(userId, questionId, roundDate, choiceIndex) {
-  db.prepare(`
-    INSERT INTO quiz_answers (user_id, question_id, round_date, choice_index)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(user_id, question_id, round_date) DO UPDATE SET choice_index = excluded.choice_index
-  `).run(userId, questionId, roundDate, choiceIndex);
+async function saveQuizAnswer(userId, questionId, roundDate, choiceIndex) {
+  await client.execute({
+    sql: `INSERT INTO quiz_answers (user_id, question_id, round_date, choice_index)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(user_id, question_id, round_date) DO UPDATE SET choice_index = excluded.choice_index`,
+    args: [userId, questionId, roundDate, choiceIndex],
+  });
 }
 
-function getUserAnswersForRound(userId, roundDate) {
-  return db.prepare(`
-    SELECT question_id AS questionId, choice_index AS choiceIndex
-    FROM quiz_answers WHERE user_id = ? AND round_date = ?
-  `).all(userId, roundDate);
+async function getUserAnswersForRound(userId, roundDate) {
+  const result = await client.execute({
+    sql: `SELECT question_id AS questionId, choice_index AS choiceIndex
+          FROM quiz_answers WHERE user_id = ? AND round_date = ?`,
+    args: [userId, roundDate],
+  });
+  return result.rows.map((r) => ({ questionId: r.questionId, choiceIndex: r.choiceIndex }));
 }
 
-function getOtherAnswersForRound(userId, roundDate) {
-  return db.prepare(`
-    SELECT user_id AS userId, question_id AS questionId, choice_index AS choiceIndex
-    FROM quiz_answers WHERE user_id != ? AND round_date = ?
-  `).all(userId, roundDate);
+async function getOtherAnswersForRound(userId, roundDate) {
+  const result = await client.execute({
+    sql: `SELECT user_id AS userId, question_id AS questionId, choice_index AS choiceIndex
+          FROM quiz_answers WHERE user_id != ? AND round_date = ?`,
+    args: [userId, roundDate],
+  });
+  return result.rows.map((r) => ({ userId: r.userId, questionId: r.questionId, choiceIndex: r.choiceIndex }));
 }
 
 module.exports = {
+  ready,
   createUser,
   getUser,
   getOtherUsers,

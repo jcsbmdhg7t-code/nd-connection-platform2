@@ -4,14 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@libsql/client": "^0.17.4",
     "@types/node": "^22.13.11",
-    "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
     "express-rate-limit": "^8.6.2",
     "socket.io": "^4.8.3"

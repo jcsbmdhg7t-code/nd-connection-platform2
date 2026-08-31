@@ -118,6 +118,14 @@ async function getOtherUsers(id) {
   return result.rows.map(rowToUser);
 }
 
+async function deleteUser(id) {
+  await client.batch([
+    { sql: "DELETE FROM quiz_answers WHERE user_id = ?", args: [id] },
+    { sql: "DELETE FROM messages WHERE user_id = ?", args: [id] },
+    { sql: "DELETE FROM users WHERE id = ?", args: [id] },
+  ], "write");
+}
+
 function rowToUser(row) {
   return {
     id: row.id,
@@ -223,6 +231,7 @@ module.exports = {
   createUser,
   getUser,
   getOtherUsers,
+  deleteUser,
   addMessage,
   getMessages,
   addReport,

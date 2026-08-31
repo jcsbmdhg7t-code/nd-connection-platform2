@@ -114,6 +114,18 @@ app.get("/api/users/:id", async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Je account weghalen betekent ook je berichten en quizantwoorden weghalen —
+// anders blijf je zichtbaar in andermans chats en matches.
+app.delete("/api/users/:id", async (req, res, next) => {
+  try {
+    const id = req.params.id;
+    const user = await db.getUser(id);
+    if (!user) return res.status(404).json({ error: "Onbekend account" });
+    await db.deleteUser(id);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
 app.get("/api/messages/:roomId", async (req, res, next) => {
   try {
     res.json(await db.getMessages(req.params.roomId));

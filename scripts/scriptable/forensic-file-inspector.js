@@ -1,51 +1,56 @@
 // ============================================================
-// FORENSIC FILE INSPECTOR v6 — NOVELTY MODE
-// Rapporteert ALLEEN nieuwe data t.o.v. het known-register.
-// Wat je al hebt, verdwijnt uit het rapport; wat nieuw is, komt op.
+// FORENSIC FILE INSPECTOR v7 — TOTAL RAW EXTRACTION
+// Doel: ALLE rauwe tekst eruit trekken, ongeacht in welke laag
+// die verstopt zit. Alle bekende verhullings-vectoren uit het
+// dossier Grothe (PGO/Quli, Epic MyChart, HAR-captures, MedMij,
+// IHE XDM, ChipSoft, Proxyman, GDrive metadata) gedeobfusceerd,
+// gedecodeerd en samengevoegd tot één doorzoekbaar tekstblok.
 // ============================================================
 //
-// KNOWN-REGISTER
-// --------------
-// Locatie: <Scriptable-map>/forensic-known.json
-// Structuur (alle keys optioneel; alles waarden zijn arrays van strings):
-//   {
-//     "bsn":      ["123456782", ...],
-//     "agb":      ["AGB-01234567"],
-//     "big":      ["12345678901"],
-//     "uzi":      ["UZI-999999999"],
-//     "oid":      ["2.16.840.1.113883.2.4.3.11.999"],
-//     "url":      ["https://mijn.example.nl/..."],
-//     "host":     ["mijn.example.nl"],
-//     "ip":       ["10.0.0.1"],
-//     "email":    ["dossier@example.nl"],
-//     "uuid":     ["01234567-89ab-cdef-0123-456789abcdef"],
-//     "session":  ["sess_abc123"],
-//     "author":   ["A. Behandelaar"],
-//     "xml_ns":   ["urn:hl7-org:v3"],
-//     "json_key": ["resourceType", "extension"],
-//     "hash":     ["deadbeef..."],       // sha-1/256 prefixen
-//     "font":     ["Arial", "Helvetica"]
-//   }
+// Wat het aankan:
+//  - UTF-8 / UTF-16 LE/BE (BOM-detectie) / Windows-1252-fallback
+//  - HTML/XML/JS/JSON escapes: &amp; &#x2F; &nbsp; \u00XX \xXX &apos;
+//  - URL-encoding (recursief), quoted-printable (=E2=80=98)
+//  - Base64 (standaard + URL-safe), hex-strings, PDF-hex <..>
+//  - JWT-tokens: header.payload gedecodeerd
+//  - ROT13
+//  - String.fromCharCode(72,101,...)
+//  - PDF octal escapes \041, PDF hex <48656C6C6F>
+//  - HTML-comments <!-- ... --> geëxtraheerd
+//  - CDATA <![CDATA[ ... ]]>
+//  - Verborgen elementen (display:none, opacity:0, hidden, aria-hidden,
+//    color:transparent, font-size:0) — tekst uit onttrokken
+//  - noscript / hidden / template-tags
+//  - Homoglyph → ASCII vertaling (Cyrillisch/Grieks)
+//  - Zero-width chars gestript, positie gerapporteerd
+//  - BIDI-overrides gestript
+//  - Alle strings ≥ 4 tekens uit binaire secties (`strings`-achtig)
+//  - Cookies uitgesplitst (JSESSIONID, medmijredirect, _vwo_uuid_v2)
+//  - HTTP-headers en HTTP-body gescheiden
+//  - JSON-in-JSON (dubbel-encoded string values → herparse)
+//  - IHE XDM METADATA.XML markers, HL7 CDA templateId's, FHIR types
+//  - Punycode xn-- domains
 //
-// Bij eerste run wordt een leeg register aangemaakt. Zet AUTO_LEARN op true
-// om ontdekte entities automatisch toe te voegen aan het register.
+// Wat Scriptable niet native kan (gerapporteerd + hex-dump):
+//  - gzip / deflate / brotli / zstd → magic bytes gedetecteerd
+//  - ZIP / 7z / RAR containers → magic bytes gedetecteerd
+//  - PDF FlateDecode streams → begin/eind gemarkeerd
+//  - Encrypted blobs → entropy-schatting
+// Zulke blobs komen als `resistant_blob` in het rapport met
+// hex-dump van de eerste 128 bytes en aanbevolen next step.
 // ============================================================
 
-const fm         = FileManager.iCloud ? FileManager.iCloud() : FileManager.local();
-const fmLocal    = FileManager.local();
-const AUTO_LEARN = false; // true = nieuwe entities toevoegen aan register na rapport
+const fm      = FileManager.iCloud ? FileManager.iCloud() : FileManager.local();
+const fmLocal = FileManager.local();
 
 // ---------- 1. ENVIRONMENT ----------
 const inApp        = config.runsInApp;
 const inShareSheet = config.runsInActionExtension;
 const inSiri       = config.runsWithSiri;
-const inWidget     = config.runsInWidget;
-const inNotif      = config.runsInNotification;
 
-const MAX_BYTES = (inShareSheet || inSiri) ? 5  * 1024 * 1024 : 20 * 1024 * 1024;
-const SCAN_HEAD = (inShareSheet || inSiri) ? 512 * 1024        : 4  * 1024 * 1024;
-const MAX_NEW_PER_TYPE = 40;
-const SAMPLE_CONTEXT = 60;
+const MAX_BYTES = (inShareSheet || inSiri) ? 5  * 1024 * 1024 : 30 * 1024 * 1024;
+const SCAN_HEAD = (inShareSheet || inSiri) ? 512 * 1024        : 8  * 1024 * 1024;
+const MIN_STRING_LEN = 4;
 
 // ---------- 2. INPUT ----------
 let inputs = [];
@@ -67,65 +72,36 @@ if (!inputs.length && args.shortcutParameter) {
   const p = args.shortcutParameter;
   inputs = Array.isArray(p) ? p : [p];
 }
-if (!inputs.length && args.queryParameters && args.queryParameters.path) {
-  inputs = [args.queryParameters.path];
-}
 
 if (!inputs.length) {
-  Script.setShortcutOutput(JSON.stringify([{
-    status: "CRITICAL",
-    reden: "Geen invoer. Check Script Settings -> Share Sheet Inputs, of Shortcut Input van de Run Script-actie."
-  }], null, 2));
+  Script.setShortcutOutput(JSON.stringify({ status:"CRITICAL", reden:"Geen invoer." }, null, 2));
   Script.complete();
 } else {
 
-// ---------- 3. KNOWN-REGISTER LADEN ----------
-function loadKnown() {
-  try {
-    const dir  = fm.documentsDirectory();
-    const path = dir + "/forensic-known.json";
-    if (!fm.fileExists(path)) {
-      const empty = {
-        bsn:[],agb:[],big:[],uzi:[],oid:[],url:[],host:[],ip:[],email:[],
-        uuid:[],session:[],author:[],xml_ns:[],json_key:[],hash:[],font:[]
-      };
-      try { fm.writeString(path, JSON.stringify(empty, null, 2)); } catch (e) {}
-      return { path: path, data: empty };
-    }
-    if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(path) &&
-        fm.isFileDownloaded && !fm.isFileDownloaded(path)) {
-      try { fm.downloadFileFromiCloud(path); } catch (e) {}
-    }
-    const raw = fm.readString(path);
-    const parsed = JSON.parse(raw || "{}");
-    return { path: path, data: parsed };
-  } catch (e) {
-    return { path: null, data: {} };
-  }
-}
-const known = loadKnown();
-const K = known.data;
-function knownSet(key) {
-  const arr = K[key] || [];
-  return new Set(arr.map(v => String(v).toLowerCase()));
-}
-const KS = {
-  bsn:      knownSet("bsn"),
-  agb:      knownSet("agb"),
-  big:      knownSet("big"),
-  uzi:      knownSet("uzi"),
-  oid:      knownSet("oid"),
-  url:      knownSet("url"),
-  host:     knownSet("host"),
-  ip:       knownSet("ip"),
-  email:    knownSet("email"),
-  uuid:     knownSet("uuid"),
-  session:  knownSet("session"),
-  author:   knownSet("author"),
-  xml_ns:   knownSet("xml_ns"),
-  json_key: knownSet("json_key"),
-  hash:     knownSet("hash"),
-  font:     knownSet("font")
+// ---------- 3. HOMOGLYPH & UNICODE MAPS ----------
+const homoglyphMap = {
+  0x0430:'a',0x0410:'A',0x0435:'e',0x0415:'E',0x043E:'o',0x041E:'O',
+  0x0440:'p',0x0420:'P',0x0441:'c',0x0421:'C',0x0445:'x',0x0425:'X',
+  0x0456:'i',0x0406:'I',0x0455:'s',0x0405:'S',0x043B:'l',0x041C:'M',
+  0x041D:'H',0x041A:'K',0x0422:'T',0x0443:'y',0x0474:'v',
+  0x03BF:'o',0x039F:'O',0x03B1:'a',0x0391:'A',0x03B2:'B',0x0392:'B',
+  0x03B5:'e',0x0395:'E',0x03BA:'k',0x039A:'K',0x03BC:'m',0x039C:'M',
+  0x03BD:'v',0x039D:'N',0x03C1:'p',0x03A1:'P',0x03C4:'t',0x03A4:'T',
+  0x03C7:'x',0x03A7:'X',0x03B9:'i',0x0399:'I',0x212A:'K',0x210E:'h'
+};
+const zwSet = new Set([0x200B,0x200C,0x200D,0xFEFF,0x2060,0x200E,0x200F,
+  0x202A,0x202B,0x202C,0x202D,0x202E,0x2066,0x2067,0x2068,0x2069]);
+const zwNames = {
+  0x200B:"ZWSP",0x200C:"ZWNJ",0x200D:"ZWJ",0xFEFF:"BOM",0x2060:"WJ",
+  0x200E:"LRM",0x200F:"RLM",0x202A:"LRE",0x202B:"RLE",0x202C:"PDF",
+  0x202D:"LRO",0x202E:"RLO",0x2066:"LRI",0x2067:"RLI",0x2068:"FSI",0x2069:"PDI"
+};
+const htmlEntities = {
+  "amp":"&","lt":"<","gt":">","quot":'"',"apos":"'",
+  "nbsp":" ","hellip":"…","mdash":"—","ndash":"–","lsquo":"\u2018",
+  "rsquo":"\u2019","ldquo":"\u201C","rdquo":"\u201D","copy":"©","reg":"®",
+  "trade":"™","euro":"€","pound":"£","yen":"¥","cent":"¢",
+  "middot":"·","bull":"•","dagger":"†","laquo":"«","raquo":"»"
 };
 
 // ---------- 4. HELPERS ----------
@@ -143,319 +119,509 @@ function resolvePath(item) {
   return normalizePath(raw);
 }
 function fileNameOf(item, path) {
-  if (item && item.name) {
-    try { return decodeURIComponent(item.name); } catch (e) { return item.name; }
-  }
+  if (item && item.name) { try { return decodeURIComponent(item.name); } catch (e) { return item.name; } }
   if (path) return path.split("/").pop();
   return "onbekend";
 }
-function safeSize(path) {
-  try {
-    if (!path || !fmLocal.fileExists(path)) return 0;
-    return fmLocal.fileSize(path) * 1024;
-  } catch (e) { return 0; }
-}
 function readTextSafe(path) {
-  try {
-    const s = fmLocal.readString(path);
-    if (s !== null && typeof s !== "undefined") return s;
-  } catch (e) {}
-  try {
-    const d = Data.fromFile(path);
-    if (d) return d.toRawString();
-  } catch (e) {}
+  try { const s = fmLocal.readString(path); if (s) return s; } catch (e) {}
+  try { const d = Data.fromFile(path); if (d) return d.toRawString(); } catch (e) {}
   return null;
 }
-function bsn11Proef(d) {
-  if (!/^\d{9}$/.test(d)) return false;
-  if (d === "000000000") return false;
-  let sum = 0;
-  for (let i = 0; i < 8; i++) sum += parseInt(d[i], 10) * (9 - i);
-  sum -= parseInt(d[8], 10);
-  return sum % 11 === 0;
+function safeSize(path) {
+  try { return fmLocal.fileExists(path) ? fmLocal.fileSize(path) * 1024 : 0; } catch (e) { return 0; }
 }
-function findAll(text, regex, limit) {
-  const results = [];
-  regex.lastIndex = 0;
-  let m;
-  while ((m = regex.exec(text)) !== null && results.length < limit) {
-    results.push({ match: m[0], index: m.index, groups: m });
-    if (m.index === regex.lastIndex) regex.lastIndex++;
+
+// ---------- 5. MAGIC BYTE DETECTIE ----------
+function detectContainer(text) {
+  if (!text || text.length < 4) return null;
+  const b0 = text.charCodeAt(0), b1 = text.charCodeAt(1), b2 = text.charCodeAt(2), b3 = text.charCodeAt(3);
+  if (b0 === 0x1F && b1 === 0x8B) return { type: "gzip", note: "content-encoding: gzip — decompress met gunzip/pigz voordat je scant" };
+  if (b0 === 0x78 && (b1 === 0x9C || b1 === 0xDA || b1 === 0x01)) return { type: "zlib/deflate", note: "zlib-stream — decompress met inflate" };
+  if (b0 === 0x50 && b1 === 0x4B && b2 === 0x03 && b3 === 0x04) return { type: "zip", note: "ZIP-container — unzip eerst" };
+  if (b0 === 0x37 && b1 === 0x7A && b2 === 0xBC && b3 === 0xAF) return { type: "7z", note: "7z-archief — 7z x eerst" };
+  if (b0 === 0x52 && b1 === 0x61 && b2 === 0x72 && b3 === 0x21) return { type: "rar", note: "RAR-archief — unrar eerst" };
+  if (b0 === 0x25 && b1 === 0x50 && b2 === 0x44 && b3 === 0x46) return { type: "pdf", note: "PDF — streams zijn vaak FlateDecode; qpdf/pdftotext eerst" };
+  if (b0 === 0x89 && b1 === 0x50 && b2 === 0x4E && b3 === 0x47) return { type: "png", note: "PNG-image" };
+  if (b0 === 0xFF && b1 === 0xD8 && b2 === 0xFF) return { type: "jpeg", note: "JPEG-image — EXIF apart uitlezen" };
+  if (b0 === 0x28 && b1 === 0xB5 && b2 === 0x2F && b3 === 0xFD) return { type: "zstd", note: "Zstandard — zstd -d eerst" };
+  if (b0 === 0xCE && b1 === 0xB2 && b2 === 0xCF && b3 === 0x81) return { type: "brotli?", note: "mogelijk Brotli" };
+  return null;
+}
+function hexDump(text, n) {
+  const bytes = [];
+  const lim = Math.min(text.length, n || 128);
+  for (let i = 0; i < lim; i++) bytes.push(text.charCodeAt(i).toString(16).padStart(2,"0"));
+  return bytes.join(" ");
+}
+
+// ---------- 6. DEOBFUSCATIE ----------
+
+// HTML entities
+function decodeHtmlEntities(s) {
+  return s
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => { try { return String.fromCodePoint(parseInt(h,16)); } catch(e){ return _; } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(parseInt(d,10)); } catch(e){ return _; } })
+    .replace(/&([a-zA-Z]+);/g, (_, n) => htmlEntities[n] || _);
+}
+
+// JS \uXXXX en \xXX escapes
+function decodeJsEscapes(s) {
+  return s
+    .replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, (_, h) => { try { return String.fromCodePoint(parseInt(h,16)); } catch(e){ return _; } })
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h,16)))
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h,16)));
+}
+
+// Percent-encoding (URL) recursief
+function decodeUrlEncoding(s, depth) {
+  let out = s, prev = null, d = 0;
+  const maxD = depth || 3;
+  while (out !== prev && d < maxD) {
+    prev = out;
+    try { out = decodeURIComponent(out.replace(/\+/g, "%20")); } catch (e) { break; }
+    d++;
   }
-  return results;
+  return out;
 }
-function contextAround(text, index, length) {
-  const from = Math.max(0, index - SAMPLE_CONTEXT);
-  const to   = Math.min(text.length, index + length + SAMPLE_CONTEXT);
-  return {
-    pre:  text.slice(from, index).replace(/\s+/g, " "),
-    hit:  text.slice(index, index + length),
-    post: text.slice(index + length, to).replace(/\s+/g, " "),
-    offset: index
-  };
+
+// Quoted-printable (RFC 2045): =E2=80=98
+function decodeQuotedPrintable(s) {
+  return s.replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h,16))).replace(/=\r?\n/g, "");
 }
-function novel(list, knownSet, hitPos) {
-  // list: array of {match, index}; return {new:[unique+context], dup:count}
-  const seenLocal = new Set();
-  const result = [];
-  let dup = 0;
-  for (const h of list) {
-    const key = String(h.match).toLowerCase();
-    if (knownSet.has(key)) { dup++; continue; }
-    if (seenLocal.has(key)) continue;
-    seenLocal.add(key);
-    result.push({
-      waarde: h.match,
-      offset: h.index,
-      context: hitPos ? contextAround(hitPos.text, h.index, h.match.length) : undefined
-    });
-    if (result.length >= MAX_NEW_PER_TYPE) break;
+
+// Base64 decoderen (met UTF-8 hersynthese)
+function b64ToBytes(str) {
+  try {
+    const clean = str.replace(/[^A-Za-z0-9+/=_-]/g, "").replace(/-/g,"+").replace(/_/g,"/");
+    const d = Data.fromBase64String(clean);
+    return d ? d.getBytes() : null;
+  } catch (e) { return null; }
+}
+function bytesToUtf8(bytes) {
+  if (!bytes) return null;
+  // UTF-8 decode heuristiek
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b < 0x80) { s += String.fromCharCode(b); }
+    else if ((b & 0xE0) === 0xC0 && i+1 < bytes.length) {
+      const c = ((b & 0x1F) << 6) | (bytes[i+1] & 0x3F); s += String.fromCharCode(c); i++;
+    } else if ((b & 0xF0) === 0xE0 && i+2 < bytes.length) {
+      const c = ((b & 0x0F) << 12) | ((bytes[i+1] & 0x3F) << 6) | (bytes[i+2] & 0x3F); s += String.fromCharCode(c); i += 2;
+    } else if ((b & 0xF8) === 0xF0 && i+3 < bytes.length) {
+      const cp = ((b & 0x07) << 18) | ((bytes[i+1] & 0x3F) << 12) | ((bytes[i+2] & 0x3F) << 6) | (bytes[i+3] & 0x3F);
+      try { s += String.fromCodePoint(cp); } catch(e){ s += "?"; } i += 3;
+    } else { s += String.fromCharCode(b); }
   }
-  return { nieuw: result, dubbel_bekend: dup };
+  return s;
 }
-function pushNovel(dest, tech, extracted) {
-  if (extracted.nieuw.length === 0 && extracted.dubbel_bekend === 0) return;
-  dest.push({
-    tech: tech,
-    nieuw_aantal: extracted.nieuw.length,
-    reeds_bekend_aantal: extracted.dubbel_bekend,
-    nieuwe_waarden: extracted.nieuw
+function decodeB64(str) {
+  const bytes = b64ToBytes(str);
+  if (!bytes) return null;
+  // is het printable text?
+  let printable = 0;
+  for (let i = 0; i < Math.min(bytes.length, 200); i++) {
+    const b = bytes[i];
+    if ((b >= 0x20 && b < 0x7F) || b === 0x0A || b === 0x0D || b === 0x09 || b >= 0x80) printable++;
+  }
+  const ratio = printable / Math.min(bytes.length, 200);
+  return { text: bytesToUtf8(bytes), printable_ratio: ratio, bytes_len: bytes.length };
+}
+
+// Hex-string naar tekst
+function decodeHexStr(str) {
+  const clean = str.replace(/[^0-9a-fA-F]/g, "");
+  if (clean.length < 4 || clean.length % 2) return null;
+  let out = "";
+  for (let i = 0; i < clean.length; i += 2) {
+    out += String.fromCharCode(parseInt(clean.substr(i,2),16));
+  }
+  return out;
+}
+
+// PDF hex string <48656C6C6F>
+function decodePdfHex(s) {
+  return s.replace(/<([0-9A-Fa-f\s]{4,})>/g, (m, h) => {
+    const t = decodeHexStr(h);
+    return t && /[\x20-\x7E]{3,}/.test(t) ? " [PDFHEX→" + t + "] " : m;
   });
 }
-function hostFromUrl(u) {
-  try { const m = /^https?:\/\/([^\/\s"'<>)]+)/i.exec(u); return m ? m[1].toLowerCase() : null; }
-  catch (e) { return null; }
+
+// PDF octal escapes \NNN
+function decodePdfOctal(s) {
+  return s.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o,8)));
 }
 
-// ---------- 5. NOVELTY SCAN ----------
-function scanNovelty(text, fileInfo, learn) {
-  const body = text.length > SCAN_HEAD ? text.slice(0, SCAN_HEAD) : text;
-  const ctx  = { text: body };
+// ROT13
+function rot13(s) {
+  return s.replace(/[A-Za-z]/g, c => {
+    const b = c.charCodeAt(0) < 91 ? 65 : 97;
+    return String.fromCharCode((c.charCodeAt(0) - b + 13) % 26 + b);
+  });
+}
 
-  // BSN (11-proef, uniek, nog niet bekend)
-  const bsnCands = findAll(body, /\b\d{9}\b/g, 300).filter(h => bsn11Proef(h.match));
-  pushNovel(fileInfo.novelty, "BSN (11-proef valide, nieuw)", novel(bsnCands, KS.bsn, ctx));
-
-  // AGB
-  const agb = findAll(body, /\bAGB[- ]?\d{8}\b/gi, 200);
-  pushNovel(fileInfo.novelty, "AGB-code (nieuw)", novel(agb, KS.agb, ctx));
-
-  // BIG
-  const big = findAll(body, /\b\d{11}(?=\s*(?:BIG|big)\b)/g, 200);
-  pushNovel(fileInfo.novelty, "BIG-nummer (nieuw)", novel(big, KS.big, ctx));
-
-  // UZI
-  const uzi = findAll(body, /\b(?:UZI|uzi)[- ]?\d{9,}\b/g, 200);
-  pushNovel(fileInfo.novelty, "UZI-nummer (nieuw)", novel(uzi, KS.uzi, ctx));
-
-  // OIDs (Epic/HL7/ChipSoft)
-  const oids = findAll(body, /\b2\.16\.\d+(?:\.\d+){2,}\b/g, 400);
-  pushNovel(fileInfo.novelty, "HL7/Epic OID (nieuw)", novel(oids, KS.oid, ctx));
-
-  // URLs volledig
-  const urls = findAll(body, /https?:\/\/[^\s"'<>)]+/gi, 500);
-  pushNovel(fileInfo.novelty, "URL (nieuw)", novel(urls, KS.url, ctx));
-
-  // Hostnames uit URLs
-  const hostList = [];
-  for (const u of urls) {
-    const h = hostFromUrl(u.match);
-    if (h) hostList.push({ match: h, index: u.index });
+// Homoglyph normaliseren
+function normalizeHomoglyphs(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (homoglyphMap[code]) out += homoglyphMap[code];
+    else out += s[i];
   }
-  pushNovel(fileInfo.novelty, "Hostname (nieuw)", novel(hostList, KS.host));
+  return out;
+}
 
-  // IPv4
-  const ips = findAll(body, /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, 300);
-  pushNovel(fileInfo.novelty, "IPv4-adres (nieuw)", novel(ips, KS.ip, ctx));
+// Zero-width strippen
+function stripZeroWidth(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    if (!zwSet.has(s.charCodeAt(i))) out += s[i];
+  }
+  return out;
+}
 
-  // Emails
-  const emails = findAll(body, /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, 300);
-  pushNovel(fileInfo.novelty, "E-mailadres (nieuw)", novel(emails, KS.email, ctx));
+// String.fromCharCode(...) reveal
+function revealFromCharCode(s) {
+  return s.replace(/String\.fromCharCode\s*\(([\d,\s]+)\)/g, (_, args) => {
+    try {
+      const nums = args.split(",").map(x => parseInt(x.trim(),10)).filter(n => !isNaN(n));
+      return " [fromCharCode→" + nums.map(n => String.fromCharCode(n)).join("") + "] ";
+    } catch (e) { return _; }
+  });
+}
 
-  // UUIDs
-  const uuids = findAll(body, /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, 300);
-  pushNovel(fileInfo.novelty, "UUID (nieuw)", novel(uuids, KS.uuid, ctx));
+// JWT tokens header.payload.signature
+function decodeJwt(s) {
+  return s.replace(/\b(eyJ[A-Za-z0-9_\-]+)\.(eyJ[A-Za-z0-9_\-]+)(\.[A-Za-z0-9_\-]+)?/g, (m, h, p, sig) => {
+    const hd = decodeB64(h);
+    const pd = decodeB64(p);
+    return " [JWT header=" + (hd ? hd.text : "?") + " payload=" + (pd ? pd.text : "?") + "] ";
+  });
+}
 
-  // Session-/request-IDs
-  const sessions = findAll(body, /\b(?:sess(?:ion)?|req(?:uest)?|token|trace|correlation)[-_]?id["']?\s*[:=]\s*["']?([A-Za-z0-9_\-]{8,})["']?/gi, 200);
-  const sessList = sessions.map(s => ({ match: (s.groups[1] || s.match), index: s.index }));
-  pushNovel(fileInfo.novelty, "Session/request-ID (nieuw)", novel(sessList, KS.session));
-
-  // Auteurs / usernames (author=, username=, "created_by":"...", <author>...)
-  const authors = [];
-  const authorRxs = [
-    /\bauthor["']?\s*[:=]\s*["']([^"'<>]{2,120})["']/gi,
-    /<author[^>]*>\s*([^<]{2,120})\s*<\/author>/gi,
-    /\b(?:username|user_name|createdBy|created_by|modifiedBy)["']?\s*[:=]\s*["']([^"'<>]{2,80})["']/gi
+// Verborgen elementen: haal tekst uit display:none, visibility:hidden, opacity:0, hidden, aria-hidden, font-size:0, color:transparent
+function extractHiddenText(s) {
+  const hits = [];
+  const patterns = [
+    /<[^>]+\bhidden\b[^>]*>([\s\S]*?)<\/[^>]+>/gi,
+    /<[^>]+\baria-hidden\s*=\s*["']true["'][^>]*>([\s\S]*?)<\/[^>]+>/gi,
+    /<[^>]+style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0|color\s*:\s*transparent)[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/gi,
+    /<template[^>]*>([\s\S]*?)<\/template>/gi,
+    /<noscript[^>]*>([\s\S]*?)<\/noscript>/gi
   ];
-  for (const rx of authorRxs) {
-    for (const h of findAll(body, rx, 200)) {
-      const v = (h.groups[1] || h.match).trim();
-      if (v.length >= 2) authors.push({ match: v, index: h.index });
+  for (const rx of patterns) {
+    let m; rx.lastIndex = 0;
+    while ((m = rx.exec(s)) !== null) {
+      const inner = m[1].replace(/<[^>]+>/g, " ").trim();
+      if (inner && inner.length > 2) hits.push(inner);
     }
   }
-  pushNovel(fileInfo.novelty, "Auteur / gebruiker (nieuw)", novel(authors, KS.author));
-
-  // XML namespaces
-  const xmlns = findAll(body, /xmlns(?::[a-zA-Z0-9]+)?\s*=\s*["']([^"']+)["']/g, 200);
-  const nsList = xmlns.map(x => ({ match: x.groups[1], index: x.index }));
-  pushNovel(fileInfo.novelty, "XML-namespace (nieuw)", novel(nsList, KS.xml_ns));
-
-  // JSON keys — top-level en 1 diepte
-  const jsonKeys = findAll(body, /"([A-Za-z_][A-Za-z0-9_]{2,60})"\s*:/g, 800);
-  const keyList = jsonKeys.map(k => ({ match: k.groups[1], index: k.index }));
-  pushNovel(fileInfo.novelty, "JSON-key (structurele novelty)", novel(keyList, KS.json_key));
-
-  // Hashes (sha1/256 prefixen)
-  const hashes = findAll(body, /\b[a-f0-9]{40,64}\b/gi, 200);
-  pushNovel(fileInfo.novelty, "Hash-string (nieuw)", novel(hashes, KS.hash, ctx));
-
-  // Font-family
-  const fonts = findAll(body, /font(?:-family)?\s*[:=]\s*["']?([^"';{}<>\n]{2,80})["']?/gi, 200);
-  const fontList = fonts.map(f => ({ match: (f.groups[1] || "").trim(), index: f.index }));
-  pushNovel(fileInfo.novelty, "Font-declaratie (nieuw)", novel(fontList, KS.font));
-
-  // -- ANOMALIE-DETECTIE (dingen die niet in het register hoeven, maar altijd verdacht) --
-
-  // Redactie-markers: [REDACTED], ***, xxxx, [WEGGELAKT], [ZWART]
-  const redact = findAll(body, /(\[REDACTED\]|\[WEGGELAKT\]|\[ZWART\]|\*{4,}|x{6,}|█{3,})/gi, 40);
-  if (redact.length) {
-    fileInfo.novelty.push({
-      tech: "REDACTIE-MARKER (mogelijk verborgen inhoud)",
-      nieuw_aantal: redact.length,
-      nieuwe_waarden: redact.slice(0, 20).map(r => ({ waarde: r.match, offset: r.index, context: contextAround(body, r.index, r.match.length) }))
-    });
-  }
-
-  // Tracking pixels / beacons
-  const beacons = findAll(body, /<img[^>]+(?:1x1|pixel|track|beacon)[^>]*>/gi, 20);
-  if (beacons.length) {
-    fileInfo.novelty.push({
-      tech: "TRACKING-PIXEL / BEACON",
-      nieuw_aantal: beacons.length,
-      nieuwe_waarden: beacons.map(b => ({ waarde: b.match.slice(0, 200), offset: b.index }))
-    });
-  }
-
-  // Verborgen CSS-regels: display:none, visibility:hidden, opacity:0, height:0
-  const hidden = findAll(body, /(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|height\s*:\s*0)[^;{}<>\n]{0,40}/gi, 40);
-  if (hidden.length) {
-    fileInfo.novelty.push({
-      tech: "VERBORGEN CSS/HTML-ELEMENT (mogelijk verborgen inhoud)",
-      nieuw_aantal: hidden.length,
-      nieuwe_waarden: hidden.slice(0, 20).map(h => ({ waarde: h.match.trim(), offset: h.index, context: contextAround(body, h.index, h.match.length) }))
-    });
-  }
-
-  // Developer-comments met info-lek
-  const devHits = findAll(body, /<!--[\s\S]{0,600}?-->/g, 40)
-    .filter(h => /TODO|FIXME|DEBUG|internal|test only|password|token|secret|hidden|deprecated|hack|workaround/i.test(h.match));
-  if (devHits.length) {
-    fileInfo.novelty.push({
-      tech: "DEV-COMMENT met info-lek",
-      nieuw_aantal: devHits.length,
-      nieuwe_waarden: devHits.map(h => ({ waarde: h.match.trim().slice(0, 400), offset: h.index }))
-    });
-  }
-
-  // Homoglyph / invisible (altijd melden — dat is nooit "normaal")
-  let hgList = [];
-  const homoglyphMap = {
-    0x0430:'a',0x0410:'A',0x0435:'e',0x0415:'E',0x043E:'o',0x041E:'O',
-    0x0440:'p',0x0420:'P',0x0441:'c',0x0421:'C',0x0445:'x',0x0425:'X',
-    0x0456:'i',0x0406:'I',0x0455:'s',0x0405:'S',0x043B:'l',0x03BF:'o',
-    0x03B1:'a',0x03B5:'e',0x03C1:'p',0x03C4:'t',0x212A:'K',0x210E:'h'
-  };
-  const zwNames = {
-    0x200B:"ZWSP",0x200C:"ZWNJ",0x200D:"ZWJ",0xFEFF:"BOM",0x2060:"WJ",
-    0x200E:"LRM",0x200F:"RLM",0x202A:"LRE",0x202B:"RLE",0x202C:"PDF",
-    0x202D:"LRO",0x202E:"RLO",0x2066:"LRI",0x2067:"RLI",0x2068:"FSI",0x2069:"PDI"
-  };
-  for (let j = 0; j < body.length && hgList.length < 20; j++) {
-    const code = body.charCodeAt(j);
-    if (homoglyphMap[code]) hgList.push({ codepoint: "U+"+code.toString(16).toUpperCase().padStart(4,"0"), lijkt_op: homoglyphMap[code], offset: j, context: contextAround(body, j, 1) });
-  }
-  if (hgList.length) {
-    fileInfo.novelty.push({ tech: "HOMOGLYPH (Cyrillisch/Grieks in ASCII-context)", nieuw_aantal: hgList.length, nieuwe_waarden: hgList });
-  }
-  let zwList = [];
-  for (let j = 0; j < body.length && zwList.length < 30; j++) {
-    const code = body.charCodeAt(j);
-    if (zwNames[code]) zwList.push({ codepoint: "U+"+code.toString(16).toUpperCase().padStart(4,"0"), naam: zwNames[code], offset: j, context: contextAround(body, j, 1) });
-  }
-  if (zwList.length) {
-    fileInfo.novelty.push({ tech: "ONZICHTBARE UNICODE / BIDI", nieuw_aantal: zwList.length, nieuwe_waarden: zwList });
-  }
-
-  // Auto-learn: alleen als vlag aan
-  if (learn) {
-    function absorb(key, values) {
-      const cur = new Set((K[key] || []).map(v => String(v).toLowerCase()));
-      for (const v of values) cur.add(String(v).toLowerCase());
-      K[key] = Array.from(cur).sort();
-    }
-    absorb("bsn",      bsnCands.map(h => h.match));
-    absorb("agb",      agb.map(h => h.match));
-    absorb("big",      big.map(h => h.match));
-    absorb("uzi",      uzi.map(h => h.match));
-    absorb("oid",      oids.map(h => h.match));
-    absorb("url",      urls.map(h => h.match));
-    absorb("host",     hostList.map(h => h.match));
-    absorb("ip",       ips.map(h => h.match));
-    absorb("email",    emails.map(h => h.match));
-    absorb("uuid",     uuids.map(h => h.match));
-    absorb("session",  sessList.map(h => h.match));
-    absorb("author",   authors.map(h => h.match));
-    absorb("xml_ns",   nsList.map(h => h.match));
-    absorb("json_key", keyList.map(h => h.match));
-    absorb("hash",     hashes.map(h => h.match));
-    absorb("font",     fontList.map(h => h.match));
-  }
+  return hits;
 }
 
-// ---------- 6. HOOFDLOOP ----------
+// HTML/XML-comments
+function extractComments(s) {
+  const hits = [];
+  let m; const rx = /<!--([\s\S]*?)-->/g;
+  while ((m = rx.exec(s)) !== null) {
+    const t = m[1].trim();
+    if (t && t.length > 2) hits.push(t);
+  }
+  return hits;
+}
+
+// CDATA
+function extractCdata(s) {
+  const hits = [];
+  let m; const rx = /<!\[CDATA\[([\s\S]*?)\]\]>/g;
+  while ((m = rx.exec(s)) !== null) hits.push(m[1]);
+  return hits;
+}
+
+// "Strings" — printable substrings ≥ N in binary secties
+function extractStrings(s, minLen) {
+  const out = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if ((c >= 0x20 && c < 0x7F) || c === 0x09) cur += s[i];
+    else {
+      if (cur.length >= minLen) out.push(cur);
+      cur = "";
+    }
+  }
+  if (cur.length >= minLen) out.push(cur);
+  return out;
+}
+
+// HTTP-response splitsen
+function splitHttp(s) {
+  const m = /^(HTTP\/[0-9.]+ \d{3}[\s\S]*?)\r?\n\r?\n([\s\S]*)$/.exec(s);
+  if (!m) return null;
+  return { headers: m[1], body: m[2] };
+}
+
+// Cookies uitsplitsen
+function parseCookies(headerBlock) {
+  const cookies = [];
+  const rx = /(?:^|\r?\n)(?:Cookie|Set-Cookie):\s*([^\r\n]+)/gi;
+  let m;
+  while ((m = rx.exec(headerBlock)) !== null) {
+    const parts = m[1].split(/;\s*/);
+    for (const p of parts) {
+      const eq = p.indexOf("=");
+      if (eq > 0) cookies.push({ naam: p.slice(0, eq).trim(), waarde: p.slice(eq+1).trim() });
+    }
+  }
+  return cookies;
+}
+
+// JSON-in-JSON reveal
+function revealNestedJson(s) {
+  const hits = [];
+  const rx = /"((?:\\.|[^"\\])*)"\s*:\s*"((?:\\"|[^"])*)"/g;
+  let m;
+  while ((m = rx.exec(s)) !== null && hits.length < 200) {
+    const val = m[2];
+    if ((val.startsWith("{") || val.startsWith("[")) && val.length > 8) {
+      try {
+        const parsed = JSON.parse(val.replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
+        hits.push({ sleutel: m[1], geparsed: parsed });
+      } catch (e) {}
+    }
+  }
+  return hits;
+}
+
+// ---------- 7. HOOFDEXTRACTIE PER BESTAND ----------
+function extractAll(rawText, fileInfo) {
+  // Container-check EERST
+  const container = detectContainer(rawText);
+  if (container) {
+    fileInfo.container = container;
+    fileInfo.hex_dump_128 = hexDump(rawText, 128);
+    // Bij een container-blob doen we alleen `strings` + hex-dump, geen textscans
+    fileInfo.strings_uit_binary = extractStrings(rawText, MIN_STRING_LEN).slice(0, 500);
+    fileInfo.instructie = "Bestand is een " + container.type + "-container. " + container.note +
+      ". Voer op je Mac/iSH: `file bestand && [gunzip|unzip|7z x|pdftotext] bestand` en share de output opnieuw.";
+    return;
+  }
+
+  // Werk op eerste SCAN_HEAD bytes voor grote bestanden
+  const body = rawText.length > SCAN_HEAD ? rawText.slice(0, SCAN_HEAD) : rawText;
+  const layers = [];
+  const revealed = {};
+
+  // Laag 1: BOM detectie
+  if (body.charCodeAt(0) === 0xFEFF) layers.push("BOM gestript");
+  let text = body.charCodeAt(0) === 0xFEFF ? body.slice(1) : body;
+
+  // Laag 2: zero-width strippen (bewaar bewijs eerst)
+  const zwFindings = [];
+  for (let i = 0; i < text.length && zwFindings.length < 40; i++) {
+    if (zwSet.has(text.charCodeAt(i))) {
+      zwFindings.push({ offset: i, codepoint: "U+"+text.charCodeAt(i).toString(16).toUpperCase().padStart(4,"0"), naam: zwNames[text.charCodeAt(i)] || "?" });
+    }
+  }
+  if (zwFindings.length) { revealed.onzichtbare_unicode = zwFindings; layers.push("zero-width/BIDI gestript"); }
+  text = stripZeroWidth(text);
+
+  // Laag 3: homoglyph normalisatie (bewaar bewijs)
+  const hgFindings = [];
+  for (let i = 0; i < text.length && hgFindings.length < 40; i++) {
+    if (homoglyphMap[text.charCodeAt(i)]) {
+      hgFindings.push({ offset: i, gevonden: text[i], lijkt_op: homoglyphMap[text.charCodeAt(i)] });
+    }
+  }
+  if (hgFindings.length) { revealed.homoglyphs = hgFindings; layers.push("homoglyphs → ASCII"); }
+  const normalized = normalizeHomoglyphs(text);
+
+  // Laag 4: HTTP-response splitsen (Proxyman/HAR-blobs)
+  const http = splitHttp(normalized);
+  if (http) {
+    layers.push("HTTP-response gesplitst in headers/body");
+    revealed.http_headers = http.headers;
+    revealed.http_cookies = parseCookies(http.headers);
+    // Body wordt daaronder verder verwerkt
+  }
+  const workText = http ? http.body : normalized;
+
+  // Laag 5: HTML/XML-comments en verborgen elementen
+  const comments = extractComments(workText);
+  if (comments.length) { revealed.html_xml_comments = comments.slice(0, 100); layers.push("HTML/XML-comments geëxtraheerd"); }
+  const cdata = extractCdata(workText);
+  if (cdata.length) { revealed.cdata_blocks = cdata.slice(0, 40); layers.push("CDATA geëxtraheerd"); }
+  const hidden = extractHiddenText(workText);
+  if (hidden.length) { revealed.verborgen_html_tekst = hidden.slice(0, 60); layers.push("verborgen HTML/CSS-tekst opgehaald"); }
+
+  // Laag 6: encoding-decoders (op de body toepassen, verzamel gedecodeerde blobs)
+  const decodedBlobs = [];
+
+  // Base64
+  const b64Rx = /[A-Za-z0-9+/_-]{40,}={0,2}/g;
+  let b64m; let b64cnt = 0;
+  while ((b64m = b64Rx.exec(workText)) !== null && b64cnt < 80) {
+    const dec = decodeB64(b64m[0]);
+    if (dec && dec.printable_ratio > 0.6 && dec.text && dec.text.length > 8) {
+      decodedBlobs.push({ methode:"base64", offset:b64m.index, lengte:b64m[0].length, tekst: dec.text.slice(0, 800) });
+      b64cnt++;
+    }
+  }
+  if (b64cnt) layers.push("base64-blobs gedecodeerd (" + b64cnt + ")");
+
+  // Hex
+  const hexRx = /\b[0-9a-fA-F]{80,}\b/g;
+  let hxm; let hxcnt = 0;
+  while ((hxm = hexRx.exec(workText)) !== null && hxcnt < 40) {
+    const dec = decodeHexStr(hxm[0]);
+    if (dec && /[\x20-\x7E]{6,}/.test(dec)) {
+      decodedBlobs.push({ methode:"hex", offset:hxm.index, lengte:hxm[0].length, tekst: dec.slice(0, 800) });
+      hxcnt++;
+    }
+  }
+  if (hxcnt) layers.push("hex-blobs gedecodeerd (" + hxcnt + ")");
+
+  // JWT tokens
+  const jwtRx = /\beyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+(?:\.[A-Za-z0-9_\-]+)?/g;
+  const jwts = [];
+  let jm;
+  while ((jm = jwtRx.exec(workText)) !== null && jwts.length < 20) {
+    const parts = jm[0].split(".");
+    const hd = decodeB64(parts[0]);
+    const pd = decodeB64(parts[1]);
+    jwts.push({ offset: jm.index, header: hd ? hd.text : null, payload: pd ? pd.text : null });
+  }
+  if (jwts.length) { revealed.jwt_tokens = jwts; layers.push("JWT-tokens gedecodeerd (" + jwts.length + ")"); }
+
+  // Quoted-printable indicaties
+  if (/=[0-9A-Fa-f]{2}(?:=[0-9A-Fa-f]{2}){2,}/.test(workText)) {
+    revealed.quoted_printable_decoded = decodeQuotedPrintable(workText.slice(0, 20000));
+    layers.push("quoted-printable gedecodeerd");
+  }
+
+  // URL-encoding (recursief)
+  if (/%[0-9A-Fa-f]{2}/.test(workText)) {
+    revealed.url_encoded_decoded = decodeUrlEncoding(workText.slice(0, 20000), 3);
+    layers.push("URL-encoding gedecodeerd (recursief)");
+  }
+
+  // HTML entities
+  if (/&(?:#\d+|#x[0-9A-Fa-f]+|[a-zA-Z]+);/.test(workText)) {
+    revealed.html_entities_decoded = decodeHtmlEntities(workText.slice(0, 20000));
+    layers.push("HTML entities gedecodeerd");
+  }
+
+  // JS-escapes
+  if (/\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}/.test(workText)) {
+    revealed.js_escapes_decoded = decodeJsEscapes(workText.slice(0, 20000));
+    layers.push("JS-escapes gedecodeerd");
+  }
+
+  // PDF hex/octal
+  if (/<[0-9A-Fa-f\s]{6,}>/.test(workText)) {
+    revealed.pdf_hex_reveal = decodePdfHex(workText.slice(0, 20000));
+    layers.push("PDF hex-strings gedecodeerd");
+  }
+  if (/\\[0-7]{3}/.test(workText)) {
+    revealed.pdf_octal_reveal = decodePdfOctal(workText.slice(0, 20000));
+    layers.push("PDF octal-escapes gedecodeerd");
+  }
+
+  // String.fromCharCode
+  if (/String\.fromCharCode/.test(workText)) {
+    revealed.js_fromcharcode_reveal = revealFromCharCode(workText.slice(0, 20000));
+    layers.push("String.fromCharCode() onthuld");
+  }
+
+  // JSON-in-JSON
+  const nested = revealNestedJson(workText);
+  if (nested.length) { revealed.nested_json = nested.slice(0, 30); layers.push("nested JSON gedecodeerd"); }
+
+  // Laag 7: NL-zorgcontext markers extraheren (harde matches uit tekst)
+  const nlZorg = {};
+  const bsnCands = (workText.match(/\b\d{9}\b/g) || []).filter(n => {
+    let s = 0;
+    for (let i = 0; i < 8; i++) s += parseInt(n[i], 10) * (9 - i);
+    s -= parseInt(n[8], 10);
+    return s % 11 === 0 && n !== "000000000";
+  });
+  if (bsnCands.length) nlZorg.bsn_11proef = Array.from(new Set(bsnCands)).slice(0, 30);
+  const agb = workText.match(/\bAGB[- ]?\d{8}\b/gi);
+  if (agb) nlZorg.agb = Array.from(new Set(agb));
+  const big = workText.match(/\b\d{11}\s*BIG\b/gi);
+  if (big) nlZorg.big = Array.from(new Set(big));
+  const uzi = workText.match(/\bUZI[- ]?\d{9,}\b/gi);
+  if (uzi) nlZorg.uzi = Array.from(new Set(uzi));
+  const oids = workText.match(/\b2\.16\.\d+(?:\.\d+){2,}\b/g);
+  if (oids) nlZorg.oids = Array.from(new Set(oids)).slice(0, 50);
+  const cda = workText.match(/<ClinicalDocument[^>]*/gi);
+  if (cda) nlZorg.hl7_cda = cda.slice(0, 5);
+  const fhir = workText.match(/"resourceType"\s*:\s*"[A-Z][A-Za-z]+"/g);
+  if (fhir) nlZorg.fhir_resources = Array.from(new Set(fhir)).slice(0, 30);
+  const xdm = workText.match(/METADATA\.XML|IHE_XDM|SUBSET\d+/gi);
+  if (xdm) nlZorg.ihe_xdm = Array.from(new Set(xdm));
+  const emails = workText.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g);
+  if (emails) nlZorg.emails = Array.from(new Set(emails)).slice(0, 30);
+  const urls = workText.match(/https?:\/\/[^\s"'<>)]+/gi);
+  if (urls) nlZorg.urls = Array.from(new Set(urls)).slice(0, 100);
+  const puny = workText.match(/\bxn--[a-z0-9\-]+/gi);
+  if (puny) nlZorg.punycode = Array.from(new Set(puny));
+
+  if (Object.keys(nlZorg).length) revealed.nl_zorg_identifiers = nlZorg;
+
+  // Laag 8: alle strings uit binaire secties
+  revealed.strings_uit_body = extractStrings(workText, MIN_STRING_LEN).slice(0, 600);
+
+  // GECONSOLIDEERDE RAUWE TEKST — alles wat we konden lezen in één blok
+  const parts = [];
+  parts.push("=== NORMALIZED (homoglyph→ASCII, zero-width gestript) ===\n" + normalized.slice(0, 40000));
+  if (http) parts.push("=== HTTP HEADERS ===\n" + http.headers);
+  if (comments.length) parts.push("=== HTML/XML COMMENTS ===\n" + comments.slice(0, 100).join("\n---\n"));
+  if (hidden.length) parts.push("=== VERBORGEN HTML/CSS TEKST ===\n" + hidden.slice(0, 60).join("\n---\n"));
+  if (cdata.length) parts.push("=== CDATA ===\n" + cdata.slice(0, 40).join("\n---\n"));
+  if (decodedBlobs.length) parts.push("=== GEDECODEERDE BASE64/HEX-BLOBS ===\n" + decodedBlobs.map(b => "[" + b.methode + "@" + b.offset + "]\n" + b.tekst).join("\n---\n"));
+  if (jwts.length) parts.push("=== JWT PAYLOADS ===\n" + jwts.map(j => "header=" + j.header + "\npayload=" + j.payload).join("\n---\n"));
+  if (nested.length) parts.push("=== NESTED JSON ===\n" + nested.map(n => n.sleutel + " => " + JSON.stringify(n.geparsed).slice(0,500)).join("\n---\n"));
+
+  fileInfo.deobfuscated_text = parts.join("\n\n");
+  fileInfo.layers_toegepast = layers;
+  fileInfo.revealed = revealed;
+}
+
+// ---------- 8. HOOFDLOOP ----------
 const rapport = [];
 for (let i = 0; i < inputs.length; i++) {
   const item = inputs[i];
   const path = resolvePath(item);
   const name = fileNameOf(item, path);
-  const fileInfo = {
-    bestandsnaam: name,
-    pad: path || "-",
-    grootte_bytes: 0,
-    status: "SCAN",
-    novelty: []
-  };
+  const fileInfo = { bestandsnaam: name, pad: path || "-", grootte_bytes: 0, status: "OK" };
 
   try {
-    if (item && item.__inlineText) {
-      fileInfo.grootte_bytes = item.__inlineText.length;
-      scanNovelty(item.__inlineText, fileInfo, AUTO_LEARN);
-      rapport.push(fileInfo);
-      continue;
+    let text = null;
+    if (item && item.__inlineText) { text = item.__inlineText; fileInfo.grootte_bytes = text.length; }
+    else {
+      if (!path) { fileInfo.status = "ERROR"; fileInfo.reden = "geen pad"; rapport.push(fileInfo); continue; }
+      if (!fmLocal.fileExists(path)) { fileInfo.status = "ERROR"; fileInfo.reden = "niet gevonden"; rapport.push(fileInfo); continue; }
+      if (fmLocal.isFileStoredIniCloud && fmLocal.isFileStoredIniCloud(path) &&
+          fmLocal.isFileDownloaded && !fmLocal.isFileDownloaded(path)) {
+        try { fmLocal.downloadFileFromiCloud(path); } catch (e) {}
+      }
+      const size = safeSize(path);
+      fileInfo.grootte_bytes = size;
+      if (size > MAX_BYTES) {
+        fileInfo.status = "SKIPPED";
+        fileInfo.reden = "> " + Math.round(MAX_BYTES/1024/1024) + "MB";
+        rapport.push(fileInfo); continue;
+      }
+      text = readTextSafe(path);
     }
-    if (!path) { fileInfo.status = "ERROR"; fileInfo.reden = "geen pad"; rapport.push(fileInfo); continue; }
-    if (!fmLocal.fileExists(path)) { fileInfo.status = "ERROR"; fileInfo.reden = "bestand bestaat niet"; rapport.push(fileInfo); continue; }
-    if (fmLocal.isFileStoredIniCloud && fmLocal.isFileStoredIniCloud(path) &&
-        fmLocal.isFileDownloaded && !fmLocal.isFileDownloaded(path)) {
-      try { fmLocal.downloadFileFromiCloud(path); } catch (e) {}
-    }
-    const size = safeSize(path);
-    fileInfo.grootte_bytes = size;
-    if (size > MAX_BYTES) {
-      fileInfo.status = "SKIPPED";
-      fileInfo.reden = "> " + Math.round(MAX_BYTES/1024/1024) + "MB (" + Math.round(size/1024/1024) + "MB)";
-      rapport.push(fileInfo);
-      continue;
-    }
-    const text = readTextSafe(path);
     if (!text || text.length === 0) {
       fileInfo.status = "UNREADABLE";
-      fileInfo.reden = "niet als tekst leesbaar";
-      rapport.push(fileInfo);
-      continue;
+      fileInfo.reden = "leeg of niet leesbaar";
+      rapport.push(fileInfo); continue;
     }
-    scanNovelty(text, fileInfo, AUTO_LEARN);
+    extractAll(text, fileInfo);
     rapport.push(fileInfo);
   } catch (error) {
     fileInfo.status = "ERROR";
@@ -464,27 +630,18 @@ for (let i = 0; i < inputs.length; i++) {
   }
 }
 
-// ---------- 7. AUTO-LEARN WRITEBACK ----------
-if (AUTO_LEARN && known.path) {
-  try { fm.writeString(known.path, JSON.stringify(K, null, 2)); } catch (e) {}
-}
-
-// ---------- 8. OUTPUT ----------
-const totaalNieuw = rapport.reduce((s, r) => s + (r.novelty || []).reduce((a, n) => a + (n.nieuw_aantal || 0), 0), 0);
+// ---------- 9. OUTPUT ----------
 const output = {
   gegenereerd: new Date().toISOString(),
-  omgeving: inApp ? "app" : inShareSheet ? "share_sheet" : inSiri ? "siri" : inWidget ? "widget" : inNotif ? "notification" : "shortcut",
-  known_register: known.path,
-  auto_learn: AUTO_LEARN,
+  omgeving: inApp ? "app" : inShareSheet ? "share_sheet" : inSiri ? "siri" : "shortcut",
   aantal_bestanden: rapport.length,
-  totaal_nieuwe_bevindingen: totaalNieuw,
   rapport: rapport
 };
 
 const json = JSON.stringify(output, null, 2);
 Script.setShortcutOutput(json);
 if (inApp) {
-  console.log(json);
+  console.log(json.slice(0, 5000));
   await QuickLook.present(json);
 }
 Script.complete();

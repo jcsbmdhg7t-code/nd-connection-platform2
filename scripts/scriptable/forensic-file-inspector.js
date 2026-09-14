@@ -1,14 +1,39 @@
 // ============================================================
-// FORENSIC FILE INSPECTOR v5 — Scriptable + Shortcuts
-// Auteur: forensisch-juridische AI-expert (voor dossier Grothe)
-// API-geverifieerd tegen docs.scriptable.app
-// Features: multi-input (Share Sheet/Shortcut/URL), homoglyph,
-// zero-width & bidi, PDF-triggers, Office-macros, base64/hex
-// DECODERING, URL/IP-extractie, NL-zorg identifiers (BSN 11-proef,
-// AGB, BIG), HL7 CDA / FHIR / IHE XDM detectie, datums.
+// FORENSIC FILE INSPECTOR v6 — NOVELTY MODE
+// Rapporteert ALLEEN nieuwe data t.o.v. het known-register.
+// Wat je al hebt, verdwijnt uit het rapport; wat nieuw is, komt op.
+// ============================================================
+//
+// KNOWN-REGISTER
+// --------------
+// Locatie: <Scriptable-map>/forensic-known.json
+// Structuur (alle keys optioneel; alles waarden zijn arrays van strings):
+//   {
+//     "bsn":      ["123456782", ...],
+//     "agb":      ["AGB-01234567"],
+//     "big":      ["12345678901"],
+//     "uzi":      ["UZI-999999999"],
+//     "oid":      ["2.16.840.1.113883.2.4.3.11.999"],
+//     "url":      ["https://mijn.example.nl/..."],
+//     "host":     ["mijn.example.nl"],
+//     "ip":       ["10.0.0.1"],
+//     "email":    ["dossier@example.nl"],
+//     "uuid":     ["01234567-89ab-cdef-0123-456789abcdef"],
+//     "session":  ["sess_abc123"],
+//     "author":   ["A. Behandelaar"],
+//     "xml_ns":   ["urn:hl7-org:v3"],
+//     "json_key": ["resourceType", "extension"],
+//     "hash":     ["deadbeef..."],       // sha-1/256 prefixen
+//     "font":     ["Arial", "Helvetica"]
+//   }
+//
+// Bij eerste run wordt een leeg register aangemaakt. Zet AUTO_LEARN op true
+// om ontdekte entities automatisch toe te voegen aan het register.
 // ============================================================
 
-const fm = FileManager.local();
+const fm         = FileManager.iCloud ? FileManager.iCloud() : FileManager.local();
+const fmLocal    = FileManager.local();
+const AUTO_LEARN = false; // true = nieuwe entities toevoegen aan register na rapport
 
 // ---------- 1. ENVIRONMENT ----------
 const inApp        = config.runsInApp;
@@ -19,18 +44,18 @@ const inNotif      = config.runsInNotification;
 
 const MAX_BYTES = (inShareSheet || inSiri) ? 5  * 1024 * 1024 : 20 * 1024 * 1024;
 const SCAN_HEAD = (inShareSheet || inSiri) ? 512 * 1024        : 4  * 1024 * 1024;
-const MAX_SAMPLES_PER_TYPE = 8;
-const SAMPLE_CONTEXT = 40;
+const MAX_NEW_PER_TYPE = 40;
+const SAMPLE_CONTEXT = 60;
 
 // ---------- 2. INPUT ----------
 let inputs = [];
 if (args.fileURLs && args.fileURLs.length) inputs = inputs.concat(args.fileURLs);
 if (args.urls && args.urls.length)         inputs = inputs.concat(args.urls);
 if (args.images && args.images.length) {
-  const tmp = fm.temporaryDirectory();
+  const tmp = fmLocal.temporaryDirectory();
   for (let k = 0; k < args.images.length; k++) {
     const p = tmp + "/shared_img_" + Date.now() + "_" + k + ".png";
-    try { fm.writeImage(p, args.images[k]); inputs.push(p); } catch (e) {}
+    try { fmLocal.writeImage(p, args.images[k]); inputs.push(p); } catch (e) {}
   }
 }
 if (args.plainTexts && args.plainTexts.length) {
@@ -48,29 +73,59 @@ if (!inputs.length && args.queryParameters && args.queryParameters.path) {
 
 if (!inputs.length) {
   Script.setShortcutOutput(JSON.stringify([{
-    bestandsnaam: "-", status: "CRITICAL",
-    indicatoren: [{ tech: "NO INPUT", data: "Geen invoer. Check Script Settings -> Share Sheet Inputs, of Shortcut Input van de Run Script-actie." }]
+    status: "CRITICAL",
+    reden: "Geen invoer. Check Script Settings -> Share Sheet Inputs, of Shortcut Input van de Run Script-actie."
   }], null, 2));
   Script.complete();
 } else {
 
-// ---------- 3. HOMOGLYPH & UNICODE MAP ----------
-const homoglyphMap = {
-  0x0430:'a',0x0410:'A',0x0435:'e',0x0415:'E',0x043E:'o',0x041E:'O',
-  0x0440:'p',0x0420:'P',0x0441:'c',0x0421:'C',0x0445:'x',0x0425:'X',
-  0x0456:'i',0x0406:'I',0x0455:'s',0x0405:'S',0x043B:'l',0x041C:'M',
-  0x041D:'H',0x041A:'K',0x0422:'T',0x0443:'y',0x0474:'v',
-  0x03BF:'o',0x039F:'O',0x03B1:'a',0x0391:'A',0x03B2:'B',0x0392:'B',
-  0x03B5:'e',0x0395:'E',0x03BA:'k',0x039A:'K',0x03BC:'m',0x039C:'M',
-  0x03BD:'v',0x039D:'N',0x03C1:'p',0x03A1:'P',0x03C4:'t',0x03A4:'T',
-  0x03C7:'x',0x03A7:'X',0x03B9:'i',0x0399:'I',0x212A:'K',0x210E:'h'
-};
-
-const zwNames = {
-  0x200B:"ZWSP", 0x200C:"ZWNJ", 0x200D:"ZWJ", 0xFEFF:"BOM/ZWNBSP",
-  0x2060:"WJ",   0x200E:"LRM",  0x200F:"RLM",
-  0x202A:"LRE",  0x202B:"RLE",  0x202C:"PDF",  0x202D:"LRO", 0x202E:"RLO",
-  0x2066:"LRI",  0x2067:"RLI",  0x2068:"FSI",  0x2069:"PDI"
+// ---------- 3. KNOWN-REGISTER LADEN ----------
+function loadKnown() {
+  try {
+    const dir  = fm.documentsDirectory();
+    const path = dir + "/forensic-known.json";
+    if (!fm.fileExists(path)) {
+      const empty = {
+        bsn:[],agb:[],big:[],uzi:[],oid:[],url:[],host:[],ip:[],email:[],
+        uuid:[],session:[],author:[],xml_ns:[],json_key:[],hash:[],font:[]
+      };
+      try { fm.writeString(path, JSON.stringify(empty, null, 2)); } catch (e) {}
+      return { path: path, data: empty };
+    }
+    if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(path) &&
+        fm.isFileDownloaded && !fm.isFileDownloaded(path)) {
+      try { fm.downloadFileFromiCloud(path); } catch (e) {}
+    }
+    const raw = fm.readString(path);
+    const parsed = JSON.parse(raw || "{}");
+    return { path: path, data: parsed };
+  } catch (e) {
+    return { path: null, data: {} };
+  }
+}
+const known = loadKnown();
+const K = known.data;
+function knownSet(key) {
+  const arr = K[key] || [];
+  return new Set(arr.map(v => String(v).toLowerCase()));
+}
+const KS = {
+  bsn:      knownSet("bsn"),
+  agb:      knownSet("agb"),
+  big:      knownSet("big"),
+  uzi:      knownSet("uzi"),
+  oid:      knownSet("oid"),
+  url:      knownSet("url"),
+  host:     knownSet("host"),
+  ip:       knownSet("ip"),
+  email:    knownSet("email"),
+  uuid:     knownSet("uuid"),
+  session:  knownSet("session"),
+  author:   knownSet("author"),
+  xml_ns:   knownSet("xml_ns"),
+  json_key: knownSet("json_key"),
+  hash:     knownSet("hash"),
+  font:     knownSet("font")
 };
 
 // ---------- 4. HELPERS ----------
@@ -96,23 +151,13 @@ function fileNameOf(item, path) {
 }
 function safeSize(path) {
   try {
-    if (!path || !fm.fileExists(path)) return 0;
-    return fm.fileSize(path) * 1024; // docs: fileSize() = KB
+    if (!path || !fmLocal.fileExists(path)) return 0;
+    return fmLocal.fileSize(path) * 1024;
   } catch (e) { return 0; }
-}
-function fileExtension(name) {
-  const m = /\.([A-Za-z0-9]{1,8})$/.exec(name || "");
-  return m ? m[1].toLowerCase() : "";
-}
-function isBinaryLike(str) {
-  const sample = str.slice(0, 4096);
-  let nulls = 0;
-  for (let i = 0; i < sample.length; i++) if (sample.charCodeAt(i) === 0) nulls++;
-  return nulls > 4;
 }
 function readTextSafe(path) {
   try {
-    const s = fm.readString(path);
+    const s = fmLocal.readString(path);
     if (s !== null && typeof s !== "undefined") return s;
   } catch (e) {}
   try {
@@ -121,6 +166,24 @@ function readTextSafe(path) {
   } catch (e) {}
   return null;
 }
+function bsn11Proef(d) {
+  if (!/^\d{9}$/.test(d)) return false;
+  if (d === "000000000") return false;
+  let sum = 0;
+  for (let i = 0; i < 8; i++) sum += parseInt(d[i], 10) * (9 - i);
+  sum -= parseInt(d[8], 10);
+  return sum % 11 === 0;
+}
+function findAll(text, regex, limit) {
+  const results = [];
+  regex.lastIndex = 0;
+  let m;
+  while ((m = regex.exec(text)) !== null && results.length < limit) {
+    results.push({ match: m[0], index: m.index, groups: m });
+    if (m.index === regex.lastIndex) regex.lastIndex++;
+  }
+  return results;
+}
 function contextAround(text, index, length) {
   const from = Math.max(0, index - SAMPLE_CONTEXT);
   const to   = Math.min(text.length, index + length + SAMPLE_CONTEXT);
@@ -128,362 +191,293 @@ function contextAround(text, index, length) {
     pre:  text.slice(from, index).replace(/\s+/g, " "),
     hit:  text.slice(index, index + length),
     post: text.slice(index + length, to).replace(/\s+/g, " "),
-    index: index
+    offset: index
   };
 }
-function decodeBase64(s) {
-  try {
-    const d = Data.fromBase64String(s);
-    if (!d) return null;
-    const raw = d.toRawString();
-    if (!raw) return null;
-    return raw.slice(0, 200);
-  } catch (e) { return null; }
-}
-function decodeHex(s) {
-  try {
-    let out = "";
-    const clean = s.replace(/\s+/g, "");
-    const lim = Math.min(clean.length, 400);
-    for (let i = 0; i < lim; i += 2) {
-      const c = parseInt(clean.substr(i, 2), 16);
-      if (isNaN(c)) return null;
-      out += String.fromCharCode(c);
-    }
-    return out.slice(0, 200);
-  } catch (e) { return null; }
-}
-function findAll(text, regex, limit) {
-  const results = [];
-  regex.lastIndex = 0;
-  let m;
-  while ((m = regex.exec(text)) !== null && results.length < limit) {
-    results.push({ match: m[0], index: m.index });
-    if (m.index === regex.lastIndex) regex.lastIndex++;
+function novel(list, knownSet, hitPos) {
+  // list: array of {match, index}; return {new:[unique+context], dup:count}
+  const seenLocal = new Set();
+  const result = [];
+  let dup = 0;
+  for (const h of list) {
+    const key = String(h.match).toLowerCase();
+    if (knownSet.has(key)) { dup++; continue; }
+    if (seenLocal.has(key)) continue;
+    seenLocal.add(key);
+    result.push({
+      waarde: h.match,
+      offset: h.index,
+      context: hitPos ? contextAround(hitPos.text, h.index, h.match.length) : undefined
+    });
+    if (result.length >= MAX_NEW_PER_TYPE) break;
   }
-  return results;
+  return { nieuw: result, dubbel_bekend: dup };
 }
-function bsn11Proef(d) {
-  if (!/^\d{9}$/.test(d)) return false;
-  let sum = 0;
-  for (let i = 0; i < 8; i++) sum += parseInt(d[i], 10) * (9 - i);
-  sum -= parseInt(d[8], 10);
-  return sum % 11 === 0 && d !== "000000000";
+function pushNovel(dest, tech, extracted) {
+  if (extracted.nieuw.length === 0 && extracted.dubbel_bekend === 0) return;
+  dest.push({
+    tech: tech,
+    nieuw_aantal: extracted.nieuw.length,
+    reeds_bekend_aantal: extracted.dubbel_bekend,
+    nieuwe_waarden: extracted.nieuw
+  });
+}
+function hostFromUrl(u) {
+  try { const m = /^https?:\/\/([^\/\s"'<>)]+)/i.exec(u); return m ? m[1].toLowerCase() : null; }
+  catch (e) { return null; }
 }
 
-// ---------- 5. SCAN + SAMPLE EXTRACTIE ----------
-function scanText(text, fileInfo) {
+// ---------- 5. NOVELTY SCAN ----------
+function scanNovelty(text, fileInfo, learn) {
   const body = text.length > SCAN_HEAD ? text.slice(0, SCAN_HEAD) : text;
+  const ctx  = { text: body };
 
-  // A. Homoglyph
-  const hgHits = [];
-  for (let j = 0; j < body.length && hgHits.length < MAX_SAMPLES_PER_TYPE; j++) {
-    const code = body.charCodeAt(j);
-    if (homoglyphMap[code]) {
-      hgHits.push({
-        positie: j,
-        code: "U+" + code.toString(16).toUpperCase().padStart(4, "0"),
-        gevonden: body[j],
-        lijkt_op: homoglyphMap[code],
-        context: contextAround(body, j, 1)
-      });
-    }
-  }
-  if (hgHits.length) {
-    fileInfo.status = "ALERT";
-    fileInfo.indicatoren.push({ tech: "HOMOGLYPH FONT SPOOFING", aantal: hgHits.length + "+", samples: hgHits });
-  }
+  // BSN (11-proef, uniek, nog niet bekend)
+  const bsnCands = findAll(body, /\b\d{9}\b/g, 300).filter(h => bsn11Proef(h.match));
+  pushNovel(fileInfo.novelty, "BSN (11-proef valide, nieuw)", novel(bsnCands, KS.bsn, ctx));
 
-  // B. Zero-width & invisible / BIDI
-  const zwHits = [];
-  for (let j = 0; j < body.length && zwHits.length < MAX_SAMPLES_PER_TYPE; j++) {
-    const code = body.charCodeAt(j);
-    if (zwNames[code]) {
-      zwHits.push({
-        positie: j,
-        code: "U+" + code.toString(16).toUpperCase().padStart(4, "0"),
-        naam: zwNames[code],
-        context: contextAround(body, j, 1)
-      });
-    }
-  }
-  if (zwHits.length) {
-    fileInfo.status = "ALERT";
-    fileInfo.indicatoren.push({ tech: "INVISIBLE / BIDI CHARS", aantal: zwHits.length + "+", samples: zwHits });
-  }
+  // AGB
+  const agb = findAll(body, /\bAGB[- ]?\d{8}\b/gi, 200);
+  pushNovel(fileInfo.novelty, "AGB-code (nieuw)", novel(agb, KS.agb, ctx));
 
-  // C. PDF-triggers
-  const pdfPatterns = [
-    { name: "PDF /OpenAction",   rx: /\/OpenAction[\s\S]{0,80}/gi },
-    { name: "PDF /AA",           rx: /\/AA[\s\S]{0,80}/gi },
-    { name: "PDF /JavaScript",   rx: /\/JavaScript[\s\S]{0,80}/gi },
-    { name: "PDF /JS",           rx: /\/JS[\s\S]{0,80}/gi },
-    { name: "PDF /Launch",       rx: /\/Launch[\s\S]{0,80}/gi },
-    { name: "PDF /EmbeddedFile", rx: /\/EmbeddedFile[\s\S]{0,80}/gi }
+  // BIG
+  const big = findAll(body, /\b\d{11}(?=\s*(?:BIG|big)\b)/g, 200);
+  pushNovel(fileInfo.novelty, "BIG-nummer (nieuw)", novel(big, KS.big, ctx));
+
+  // UZI
+  const uzi = findAll(body, /\b(?:UZI|uzi)[- ]?\d{9,}\b/g, 200);
+  pushNovel(fileInfo.novelty, "UZI-nummer (nieuw)", novel(uzi, KS.uzi, ctx));
+
+  // OIDs (Epic/HL7/ChipSoft)
+  const oids = findAll(body, /\b2\.16\.\d+(?:\.\d+){2,}\b/g, 400);
+  pushNovel(fileInfo.novelty, "HL7/Epic OID (nieuw)", novel(oids, KS.oid, ctx));
+
+  // URLs volledig
+  const urls = findAll(body, /https?:\/\/[^\s"'<>)]+/gi, 500);
+  pushNovel(fileInfo.novelty, "URL (nieuw)", novel(urls, KS.url, ctx));
+
+  // Hostnames uit URLs
+  const hostList = [];
+  for (const u of urls) {
+    const h = hostFromUrl(u.match);
+    if (h) hostList.push({ match: h, index: u.index });
+  }
+  pushNovel(fileInfo.novelty, "Hostname (nieuw)", novel(hostList, KS.host));
+
+  // IPv4
+  const ips = findAll(body, /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, 300);
+  pushNovel(fileInfo.novelty, "IPv4-adres (nieuw)", novel(ips, KS.ip, ctx));
+
+  // Emails
+  const emails = findAll(body, /[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, 300);
+  pushNovel(fileInfo.novelty, "E-mailadres (nieuw)", novel(emails, KS.email, ctx));
+
+  // UUIDs
+  const uuids = findAll(body, /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, 300);
+  pushNovel(fileInfo.novelty, "UUID (nieuw)", novel(uuids, KS.uuid, ctx));
+
+  // Session-/request-IDs
+  const sessions = findAll(body, /\b(?:sess(?:ion)?|req(?:uest)?|token|trace|correlation)[-_]?id["']?\s*[:=]\s*["']?([A-Za-z0-9_\-]{8,})["']?/gi, 200);
+  const sessList = sessions.map(s => ({ match: (s.groups[1] || s.match), index: s.index }));
+  pushNovel(fileInfo.novelty, "Session/request-ID (nieuw)", novel(sessList, KS.session));
+
+  // Auteurs / usernames (author=, username=, "created_by":"...", <author>...)
+  const authors = [];
+  const authorRxs = [
+    /\bauthor["']?\s*[:=]\s*["']([^"'<>]{2,120})["']/gi,
+    /<author[^>]*>\s*([^<]{2,120})\s*<\/author>/gi,
+    /\b(?:username|user_name|createdBy|created_by|modifiedBy)["']?\s*[:=]\s*["']([^"'<>]{2,80})["']/gi
   ];
-  for (const p of pdfPatterns) {
-    const hits = findAll(body, p.rx, MAX_SAMPLES_PER_TYPE);
-    if (hits.length) {
-      fileInfo.status = "SUSPECT";
-      fileInfo.indicatoren.push({
-        tech: p.name, aantal: hits.length,
-        samples: hits.map(h => ({ positie: h.index, fragment: h.match.trim() }))
-      });
+  for (const rx of authorRxs) {
+    for (const h of findAll(body, rx, 200)) {
+      const v = (h.groups[1] || h.match).trim();
+      if (v.length >= 2) authors.push({ match: v, index: h.index });
     }
   }
+  pushNovel(fileInfo.novelty, "Auteur / gebruiker (nieuw)", novel(authors, KS.author));
 
-  // D. Office / macro
-  const officePatterns = [
-    { name: "OFFICE EXTERNAL RELATIONSHIP", rx: /TargetMode\s*=\s*["']External["'][\s\S]{0,120}/gi },
-    { name: "OFFICE OLE OBJECT",            rx: /oleObject[\s\S]{0,120}/gi },
-    { name: "OFFICE VBA PROJECT",           rx: /vbaProject\.bin[\s\S]{0,80}/gi },
-    { name: "OFFICE MACRO PATH",            rx: /macros?\/[A-Za-z0-9_\-.]+/gi }
-  ];
-  for (const p of officePatterns) {
-    const hits = findAll(body, p.rx, MAX_SAMPLES_PER_TYPE);
-    if (hits.length) {
-      fileInfo.status = "SUSPECT";
-      fileInfo.indicatoren.push({
-        tech: p.name, aantal: hits.length,
-        samples: hits.map(h => ({ positie: h.index, fragment: h.match.trim() }))
-      });
-    }
-  }
+  // XML namespaces
+  const xmlns = findAll(body, /xmlns(?::[a-zA-Z0-9]+)?\s*=\s*["']([^"']+)["']/g, 200);
+  const nsList = xmlns.map(x => ({ match: x.groups[1], index: x.index }));
+  pushNovel(fileInfo.novelty, "XML-namespace (nieuw)", novel(nsList, KS.xml_ns));
 
-  // E. Shell / sandbox
-  const shellHits = findAll(body, /\b(osascript|applescript|powershell|cmd\.exe|wscript|cscript|bash|zsh)\b[\s\S]{0,80}/gi, MAX_SAMPLES_PER_TYPE);
-  if (shellHits.length) {
-    fileInfo.status = "SUSPECT";
-    fileInfo.indicatoren.push({
-      tech: "SHELL / SCRIPT ENGINE REFERENCE", aantal: shellHits.length,
-      samples: shellHits.map(h => ({ positie: h.index, fragment: h.match.trim() }))
+  // JSON keys — top-level en 1 diepte
+  const jsonKeys = findAll(body, /"([A-Za-z_][A-Za-z0-9_]{2,60})"\s*:/g, 800);
+  const keyList = jsonKeys.map(k => ({ match: k.groups[1], index: k.index }));
+  pushNovel(fileInfo.novelty, "JSON-key (structurele novelty)", novel(keyList, KS.json_key));
+
+  // Hashes (sha1/256 prefixen)
+  const hashes = findAll(body, /\b[a-f0-9]{40,64}\b/gi, 200);
+  pushNovel(fileInfo.novelty, "Hash-string (nieuw)", novel(hashes, KS.hash, ctx));
+
+  // Font-family
+  const fonts = findAll(body, /font(?:-family)?\s*[:=]\s*["']?([^"';{}<>\n]{2,80})["']?/gi, 200);
+  const fontList = fonts.map(f => ({ match: (f.groups[1] || "").trim(), index: f.index }));
+  pushNovel(fileInfo.novelty, "Font-declaratie (nieuw)", novel(fontList, KS.font));
+
+  // -- ANOMALIE-DETECTIE (dingen die niet in het register hoeven, maar altijd verdacht) --
+
+  // Redactie-markers: [REDACTED], ***, xxxx, [WEGGELAKT], [ZWART]
+  const redact = findAll(body, /(\[REDACTED\]|\[WEGGELAKT\]|\[ZWART\]|\*{4,}|x{6,}|█{3,})/gi, 40);
+  if (redact.length) {
+    fileInfo.novelty.push({
+      tech: "REDACTIE-MARKER (mogelijk verborgen inhoud)",
+      nieuw_aantal: redact.length,
+      nieuwe_waarden: redact.slice(0, 20).map(r => ({ waarde: r.match, offset: r.index, context: contextAround(body, r.index, r.match.length) }))
     });
   }
 
-  // F. Base64 payloads — DECODEREN
-  const b64Hits = findAll(body, /[A-Za-z0-9+/]{80,}={0,2}/g, MAX_SAMPLES_PER_TYPE);
-  if (b64Hits.length) {
-    fileInfo.indicatoren.push({
-      tech: "BASE64 PAYLOAD CHAIN", aantal: b64Hits.length,
-      samples: b64Hits.map(h => ({
-        positie: h.index, lengte: h.match.length,
-        encoded_preview: h.match.slice(0, 80) + (h.match.length > 80 ? "…" : ""),
-        decoded_preview: decodeBase64(h.match)
-      }))
+  // Tracking pixels / beacons
+  const beacons = findAll(body, /<img[^>]+(?:1x1|pixel|track|beacon)[^>]*>/gi, 20);
+  if (beacons.length) {
+    fileInfo.novelty.push({
+      tech: "TRACKING-PIXEL / BEACON",
+      nieuw_aantal: beacons.length,
+      nieuwe_waarden: beacons.map(b => ({ waarde: b.match.slice(0, 200), offset: b.index }))
     });
   }
 
-  // G. Hex payloads — DECODEREN
-  const hexHits = findAll(body, /[0-9a-fA-F]{80,}/g, MAX_SAMPLES_PER_TYPE);
-  if (hexHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "HEX PAYLOAD CHAIN", aantal: hexHits.length,
-      samples: hexHits.map(h => ({
-        positie: h.index, lengte: h.match.length,
-        encoded_preview: h.match.slice(0, 80) + (h.match.length > 80 ? "…" : ""),
-        decoded_preview: decodeHex(h.match)
-      }))
+  // Verborgen CSS-regels: display:none, visibility:hidden, opacity:0, height:0
+  const hidden = findAll(body, /(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|height\s*:\s*0)[^;{}<>\n]{0,40}/gi, 40);
+  if (hidden.length) {
+    fileInfo.novelty.push({
+      tech: "VERBORGEN CSS/HTML-ELEMENT (mogelijk verborgen inhoud)",
+      nieuw_aantal: hidden.length,
+      nieuwe_waarden: hidden.slice(0, 20).map(h => ({ waarde: h.match.trim(), offset: h.index, context: contextAround(body, h.index, h.match.length) }))
     });
   }
 
-  // H. URLs
-  const urlHits = findAll(body, /https?:\/\/[^\s"'<>)]+/gi, 20);
-  if (urlHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "EMBEDDED URL(S)", aantal: urlHits.length,
-      samples: urlHits.map(h => ({ positie: h.index, url: h.match }))
-    });
-  }
-
-  // I. IPv4
-  const ipHits = findAll(body, /\b\d{1,3}(?:\.\d{1,3}){3}\b/g, 20);
-  if (ipHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "EMBEDDED IPv4", aantal: ipHits.length,
-      samples: ipHits.map(h => ({ positie: h.index, ip: h.match }))
-    });
-  }
-
-  // J. Dev comments
-  const devHits = findAll(body, /<!--[\s\S]{0,400}?-->/g, MAX_SAMPLES_PER_TYPE)
-    .filter(h => /TODO|FIXME|DEBUG|internal|test only/i.test(h.match));
+  // Developer-comments met info-lek
+  const devHits = findAll(body, /<!--[\s\S]{0,600}?-->/g, 40)
+    .filter(h => /TODO|FIXME|DEBUG|internal|test only|password|token|secret|hidden|deprecated|hack|workaround/i.test(h.match));
   if (devHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "DEV COMMENT LEAK", aantal: devHits.length,
-      samples: devHits.map(h => ({ positie: h.index, comment: h.match.trim() }))
+    fileInfo.novelty.push({
+      tech: "DEV-COMMENT met info-lek",
+      nieuw_aantal: devHits.length,
+      nieuwe_waarden: devHits.map(h => ({ waarde: h.match.trim().slice(0, 400), offset: h.index }))
     });
   }
 
-  // K. NL zorg-context
-  const cdaHits = findAll(body, /<ClinicalDocument[\s\S]{0,200}/gi, 3);
-  if (cdaHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "HL7 CDA R2 DOCUMENT", aantal: cdaHits.length,
-      samples: cdaHits.map(h => ({ positie: h.index, fragment: h.match.trim() }))
-    });
+  // Homoglyph / invisible (altijd melden — dat is nooit "normaal")
+  let hgList = [];
+  const homoglyphMap = {
+    0x0430:'a',0x0410:'A',0x0435:'e',0x0415:'E',0x043E:'o',0x041E:'O',
+    0x0440:'p',0x0420:'P',0x0441:'c',0x0421:'C',0x0445:'x',0x0425:'X',
+    0x0456:'i',0x0406:'I',0x0455:'s',0x0405:'S',0x043B:'l',0x03BF:'o',
+    0x03B1:'a',0x03B5:'e',0x03C1:'p',0x03C4:'t',0x212A:'K',0x210E:'h'
+  };
+  const zwNames = {
+    0x200B:"ZWSP",0x200C:"ZWNJ",0x200D:"ZWJ",0xFEFF:"BOM",0x2060:"WJ",
+    0x200E:"LRM",0x200F:"RLM",0x202A:"LRE",0x202B:"RLE",0x202C:"PDF",
+    0x202D:"LRO",0x202E:"RLO",0x2066:"LRI",0x2067:"RLI",0x2068:"FSI",0x2069:"PDI"
+  };
+  for (let j = 0; j < body.length && hgList.length < 20; j++) {
+    const code = body.charCodeAt(j);
+    if (homoglyphMap[code]) hgList.push({ codepoint: "U+"+code.toString(16).toUpperCase().padStart(4,"0"), lijkt_op: homoglyphMap[code], offset: j, context: contextAround(body, j, 1) });
   }
-  const fhirHits = findAll(body, /"resourceType"\s*:\s*"(Patient|Bundle|Composition|Observation|DocumentReference|Practitioner|Organization|Encounter|Condition|MedicationStatement|AllergyIntolerance|Procedure)"/gi, 10);
-  if (fhirHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "FHIR RESOURCES", aantal: fhirHits.length,
-      samples: fhirHits.map(h => ({ positie: h.index, fragment: h.match }))
-    });
+  if (hgList.length) {
+    fileInfo.novelty.push({ tech: "HOMOGLYPH (Cyrillisch/Grieks in ASCII-context)", nieuw_aantal: hgList.length, nieuwe_waarden: hgList });
   }
-  const xdmHits = findAll(body, /(METADATA\.XML|IHE_XDM|SUBSET\d+)/gi, 5);
-  if (xdmHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "IHE XDM ENVELOPPE", aantal: xdmHits.length,
-      samples: xdmHits.map(h => ({ positie: h.index, fragment: h.match }))
-    });
+  let zwList = [];
+  for (let j = 0; j < body.length && zwList.length < 30; j++) {
+    const code = body.charCodeAt(j);
+    if (zwNames[code]) zwList.push({ codepoint: "U+"+code.toString(16).toUpperCase().padStart(4,"0"), naam: zwNames[code], offset: j, context: contextAround(body, j, 1) });
   }
-
-  // L. NL identifiers — BSN met 11-proef
-  const bsnCandidates = findAll(body, /\b\d{9}\b/g, 100);
-  const bsnHits = bsnCandidates.filter(h => bsn11Proef(h.match)).slice(0, 15);
-  if (bsnHits.length) {
-    fileInfo.status = "ALERT";
-    fileInfo.indicatoren.push({
-      tech: "MOGELIJK BSN (11-proef valide)", aantal: bsnHits.length,
-      samples: bsnHits.map(h => ({ positie: h.index, bsn: h.match, context: contextAround(body, h.index, 9) }))
-    });
-  }
-  const agbHits = findAll(body, /\bAGB[- ]?\d{8}\b/gi, 10);
-  if (agbHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "AGB-CODE ZORGVERLENER", aantal: agbHits.length,
-      samples: agbHits.map(h => ({ positie: h.index, agb: h.match }))
-    });
-  }
-  const bigHits = findAll(body, /\b\d{11}\s*(BIG|big)\b/g, 10);
-  if (bigHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "BIG-NUMMER", aantal: bigHits.length,
-      samples: bigHits.map(h => ({ positie: h.index, big: h.match }))
-    });
-  }
-  const uziHits = findAll(body, /\b(UZI|uzi)[- ]?\d{9,}\b/g, 10);
-  if (uziHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "UZI-NUMMER", aantal: uziHits.length,
-      samples: uziHits.map(h => ({ positie: h.index, uzi: h.match }))
-    });
+  if (zwList.length) {
+    fileInfo.novelty.push({ tech: "ONZICHTBARE UNICODE / BIDI", nieuw_aantal: zwList.length, nieuwe_waarden: zwList });
   }
 
-  // M. Datums / tijdstempels
-  const dateHits = findAll(body, /\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/g, 20);
-  if (dateHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "DATUMS/TIJDSTEMPELS", aantal: dateHits.length,
-      samples: dateHits.slice(0, 10).map(h => ({ positie: h.index, timestamp: h.match }))
-    });
-  }
-
-  // N. Epic / OIDs
-  const oidHits = findAll(body, /\b2\.16\.840\.1\.113883[\.\d]+/g, 10);
-  if (oidHits.length) {
-    fileInfo.indicatoren.push({
-      tech: "HL7 OID (o.a. Epic/ChipSoft)", aantal: oidHits.length,
-      samples: oidHits.map(h => ({ positie: h.index, oid: h.match }))
-    });
-  }
-
-  if (fileInfo.status === "CLEAN" && fileInfo.indicatoren.length) {
-    fileInfo.status = "NOTE";
+  // Auto-learn: alleen als vlag aan
+  if (learn) {
+    function absorb(key, values) {
+      const cur = new Set((K[key] || []).map(v => String(v).toLowerCase()));
+      for (const v of values) cur.add(String(v).toLowerCase());
+      K[key] = Array.from(cur).sort();
+    }
+    absorb("bsn",      bsnCands.map(h => h.match));
+    absorb("agb",      agb.map(h => h.match));
+    absorb("big",      big.map(h => h.match));
+    absorb("uzi",      uzi.map(h => h.match));
+    absorb("oid",      oids.map(h => h.match));
+    absorb("url",      urls.map(h => h.match));
+    absorb("host",     hostList.map(h => h.match));
+    absorb("ip",       ips.map(h => h.match));
+    absorb("email",    emails.map(h => h.match));
+    absorb("uuid",     uuids.map(h => h.match));
+    absorb("session",  sessList.map(h => h.match));
+    absorb("author",   authors.map(h => h.match));
+    absorb("xml_ns",   nsList.map(h => h.match));
+    absorb("json_key", keyList.map(h => h.match));
+    absorb("hash",     hashes.map(h => h.match));
+    absorb("font",     fontList.map(h => h.match));
   }
 }
 
 // ---------- 6. HOOFDLOOP ----------
-let rapport = [];
-
+const rapport = [];
 for (let i = 0; i < inputs.length; i++) {
   const item = inputs[i];
   const path = resolvePath(item);
   const name = fileNameOf(item, path);
   const fileInfo = {
     bestandsnaam: name,
-    extensie: fileExtension(name),
     pad: path || "-",
     grootte_bytes: 0,
-    status: "CLEAN",
-    indicatoren: []
+    status: "SCAN",
+    novelty: []
   };
 
   try {
     if (item && item.__inlineText) {
       fileInfo.grootte_bytes = item.__inlineText.length;
-      scanText(item.__inlineText, fileInfo);
+      scanNovelty(item.__inlineText, fileInfo, AUTO_LEARN);
       rapport.push(fileInfo);
       continue;
     }
-    if (!path) {
-      fileInfo.status = "ERROR";
-      fileInfo.indicatoren.push({ tech: "NO PATH", data: "Geen pad." });
-      rapport.push(fileInfo);
-      continue;
-    }
-    if (!fm.fileExists(path)) {
-      fileInfo.status = "ERROR";
-      fileInfo.indicatoren.push({ tech: "NOT FOUND", data: "Bestand bestaat niet." });
-      rapport.push(fileInfo);
-      continue;
-    }
-    if (fm.isFileStoredIniCloud && fm.isFileStoredIniCloud(path) &&
-        fm.isFileDownloaded && !fm.isFileDownloaded(path)) {
-      try { fm.downloadFileFromiCloud(path); } catch (e) {}
+    if (!path) { fileInfo.status = "ERROR"; fileInfo.reden = "geen pad"; rapport.push(fileInfo); continue; }
+    if (!fmLocal.fileExists(path)) { fileInfo.status = "ERROR"; fileInfo.reden = "bestand bestaat niet"; rapport.push(fileInfo); continue; }
+    if (fmLocal.isFileStoredIniCloud && fmLocal.isFileStoredIniCloud(path) &&
+        fmLocal.isFileDownloaded && !fmLocal.isFileDownloaded(path)) {
+      try { fmLocal.downloadFileFromiCloud(path); } catch (e) {}
     }
     const size = safeSize(path);
     fileInfo.grootte_bytes = size;
     if (size > MAX_BYTES) {
-      fileInfo.status = "ALERT";
-      fileInfo.indicatoren.push({
-        tech: "MEMORY GUARD",
-        data: "Bestand > " + Math.round(MAX_BYTES / 1024 / 1024) + "MB (" + Math.round(size / 1024 / 1024) + "MB)."
-      });
+      fileInfo.status = "SKIPPED";
+      fileInfo.reden = "> " + Math.round(MAX_BYTES/1024/1024) + "MB (" + Math.round(size/1024/1024) + "MB)";
       rapport.push(fileInfo);
       continue;
     }
     const text = readTextSafe(path);
-    if (text === null || typeof text === "undefined" || text.length === 0) {
+    if (!text || text.length === 0) {
       fileInfo.status = "UNREADABLE";
-      fileInfo.indicatoren.push({ tech: "BINARY OR EMPTY", data: "Niet als tekst leesbaar." });
+      fileInfo.reden = "niet als tekst leesbaar";
       rapport.push(fileInfo);
       continue;
     }
-    if (isBinaryLike(text)) {
-      fileInfo.indicatoren.push({ tech: "BINARY MIXED", data: "Null-bytes; scan best-effort." });
-    }
-    scanText(text, fileInfo);
+    scanNovelty(text, fileInfo, AUTO_LEARN);
     rapport.push(fileInfo);
   } catch (error) {
     fileInfo.status = "ERROR";
-    fileInfo.indicatoren.push({
-      tech: "FORENSIC EXCEPTION",
-      data: (error && error.message) ? error.message : String(error)
-    });
+    fileInfo.reden = (error && error.message) ? error.message : String(error);
     rapport.push(fileInfo);
   }
 }
 
-// ---------- 7. OUTPUT ----------
-const omgeving = inApp ? "app"
-              : inShareSheet ? "share_sheet"
-              : inSiri ? "siri"
-              : inWidget ? "widget"
-              : inNotif ? "notification"
-              : "shortcut";
+// ---------- 7. AUTO-LEARN WRITEBACK ----------
+if (AUTO_LEARN && known.path) {
+  try { fm.writeString(known.path, JSON.stringify(K, null, 2)); } catch (e) {}
+}
 
+// ---------- 8. OUTPUT ----------
+const totaalNieuw = rapport.reduce((s, r) => s + (r.novelty || []).reduce((a, n) => a + (n.nieuw_aantal || 0), 0), 0);
 const output = {
   gegenereerd: new Date().toISOString(),
-  omgeving: omgeving,
+  omgeving: inApp ? "app" : inShareSheet ? "share_sheet" : inSiri ? "siri" : inWidget ? "widget" : inNotif ? "notification" : "shortcut",
+  known_register: known.path,
+  auto_learn: AUTO_LEARN,
   aantal_bestanden: rapport.length,
-  samenvatting: {
-    ALERT:      rapport.filter(r => r.status === "ALERT").length,
-    SUSPECT:    rapport.filter(r => r.status === "SUSPECT").length,
-    NOTE:       rapport.filter(r => r.status === "NOTE").length,
-    CLEAN:      rapport.filter(r => r.status === "CLEAN").length,
-    ERROR:      rapport.filter(r => r.status === "ERROR").length,
-    UNREADABLE: rapport.filter(r => r.status === "UNREADABLE").length
-  },
+  totaal_nieuwe_bevindingen: totaalNieuw,
   rapport: rapport
 };
 

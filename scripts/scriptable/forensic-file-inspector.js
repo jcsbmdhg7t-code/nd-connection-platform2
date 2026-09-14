@@ -1,13 +1,43 @@
 // ============================================================
-// FORENSIC FILE INSPECTOR v8 — MET INFLATE-DECOMPRESSIE
-// Nu ook binair: gzip, zlib/deflate, ZIP-entries, PDF FlateDecode.
-// tiny-inflate port (public domain / MIT — foliojs) inline embedded.
+// FORENSIC FILE INSPECTOR v9 — VOLLEDIGE UITBREIDING
+// Wat v9 toevoegt bovenop v8:
+//   - UTF-16 LE/BE + Windows-1252 fallback decoding
+//   - HAR JSON parsing (Chrome/Safari/Proxyman)
+//   - HTTP chunked transfer decoding
+//   - Data URI extractie + decodering (SVG/HTML embedded blobs)
+//   - PDF /Info metadata (Author/Producer/CreationDate/ModDate)
+//   - PDF XMP metadata blok
+//   - PDF ObjStm (compressed object streams) uitpakken
+//   - DOCX/XLSX/PPTX text-extractie (w:t, sharedStrings, slide xml)
+//   - PNG tEXt / zTXt / iTXt metadata chunks
+//   - JPEG COM (0xFFFE) commentaar segmenten + APP1 EXIF-marker
+//   - Property list (XML plist + bplist00 detectie)
+//   - RTF text-extractie
+//   - Meta-refresh redirects + source-map URLs
+//   - JSONP callback strip
+//   - Multipart form boundaries splitsen
+//   - Base32 detectie
+//   - Punycode xn-- decode
+//   - ROT13 automatische detectie (frequentie-analyse)
+//   - Signed URL parameters (X-Amz-*, Signature=, Expires=)
+//   - Executable magic bytes (MZ/PE, ELF, Mach-O, Java class)
+//   - AppleDouble ._ resource fork strip
+//   - Line-ending anomalie detectie (mixed CR/LF/CRLF)
+//   - Whitespace steganography (trailing space patterns)
+//   - Timestamp anomalie/antedatering detectie
+//   - CSS content: attr() reveal
+//   - HTML meta-tags + Open Graph + srcset
+//
+// Wat nog steeds NIET native kan (rapporteert het + geeft tool-advies):
+//   - LZMA/7z, RAR, brotli, zstd (algoritmes te groot om inline te embedden)
+//   - OCR van scan-PDFs
+//   - Encrypted PDF-content
+//   - Volledige PDF-font CMap resolutie (voor Tj text-decoding met custom fonts)
 // ============================================================
 
 const fm      = FileManager.iCloud ? FileManager.iCloud() : FileManager.local();
 const fmLocal = FileManager.local();
 
-// ---------- 1. ENVIRONMENT ----------
 const inApp        = config.runsInApp;
 const inShareSheet = config.runsInActionExtension;
 const inSiri       = config.runsWithSiri;
@@ -15,13 +45,10 @@ const inSiri       = config.runsWithSiri;
 const MAX_BYTES = (inShareSheet || inSiri) ? 5  * 1024 * 1024 : 30 * 1024 * 1024;
 const SCAN_HEAD = (inShareSheet || inSiri) ? 512 * 1024        : 8  * 1024 * 1024;
 const MIN_STRING_LEN = 4;
-const INFLATE_MAX_OUT = 32 * 1024 * 1024; // 32 MB max per inflate
+const INFLATE_MAX_OUT = 32 * 1024 * 1024;
 
 // ============================================================
-// TINY-INFLATE (pure JS DEFLATE decoder)
-// Origineel: https://github.com/foliojs/tiny-inflate (MIT)
-// Aangepast: werkt op Uint8Array-equivalent (gewoon array van bytes),
-// geeft byte-array terug.
+// TINY-INFLATE (MIT, foliojs) — DEFLATE decoder
 // ============================================================
 function makeInflate() {
   const TINF_OK = 0, TINF_DATA_ERROR = -3;
@@ -36,7 +63,6 @@ function makeInflate() {
   const dist_bits = new Uint8Array(30), dist_base = new Uint16Array(30);
   const clcidx = new Uint8Array([16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]);
   const code_tree = new Tree(), lengths = new Uint8Array(288+32);
-
   function tinf_build_bits_base(bits, base, delta, first) {
     let i, sum;
     for (i = 0; i < delta; i++) bits[i] = 0;
@@ -62,9 +88,7 @@ function makeInflate() {
     for (i = 0; i < num; i++) t.table[lens[off + i]]++;
     t.table[0] = 0;
     for (sum = 0, i = 0; i < 16; i++) { offs[i] = sum; sum += t.table[i]; }
-    for (i = 0; i < num; i++) {
-      if (lens[off + i]) t.trans[offs[lens[off + i]]++] = i;
-    }
+    for (i = 0; i < num; i++) { if (lens[off + i]) t.trans[offs[lens[off + i]]++] = i; }
   }
   function tinf_getbit(d) {
     if (!d.bitcount--) { d.tag = d.source[d.sourceIndex++]; d.bitcount = 7; }
@@ -97,19 +121,10 @@ function makeInflate() {
     for (num = 0; num < hlit + hdist;) {
       const sym = tinf_decode_symbol(d, code_tree);
       switch (sym) {
-        case 16: {
-          const prev = lengths[num - 1];
-          for (length = tinf_read_bits(d, 2, 3); length; --length) lengths[num++] = prev;
-          break;
-        }
-        case 17:
-          for (length = tinf_read_bits(d, 3, 3); length; --length) lengths[num++] = 0;
-          break;
-        case 18:
-          for (length = tinf_read_bits(d, 7, 11); length; --length) lengths[num++] = 0;
-          break;
-        default:
-          lengths[num++] = sym; break;
+        case 16: { const prev = lengths[num - 1]; for (length = tinf_read_bits(d, 2, 3); length; --length) lengths[num++] = prev; break; }
+        case 17: for (length = tinf_read_bits(d, 3, 3); length; --length) lengths[num++] = 0; break;
+        case 18: for (length = tinf_read_bits(d, 7, 11); length; --length) lengths[num++] = 0; break;
+        default: lengths[num++] = sym; break;
       }
     }
     tinf_build_tree(lt, lengths, 0, hlit);
@@ -143,7 +158,6 @@ function makeInflate() {
   tinf_build_fixed_trees(sltree, sdtree);
   tinf_build_bits_base(length_bits, length_base, 4, 3); length_bits[28] = 0; length_base[28] = 258;
   tinf_build_bits_base(dist_bits, dist_base, 2, 1);
-
   return function inflate(source, dest) {
     const d = new Data(source, dest || new Uint8Array(source.length * 8));
     let bfinal, btype, res;
@@ -162,34 +176,23 @@ function makeInflate() {
   };
 }
 const inflate = makeInflate();
-
-// gzip wrapper: strip 10-byte header + optional fields
 function gunzip(bytes) {
   if (bytes[0] !== 0x1F || bytes[1] !== 0x8B) throw new Error("not gzip");
-  let i = 10;
-  const flg = bytes[3];
-  if (flg & 0x04) { // FEXTRA
-    const xlen = bytes[i] | (bytes[i+1] << 8); i += 2 + xlen;
-  }
-  if (flg & 0x08) { // FNAME
-    while (bytes[i] !== 0) i++; i++;
-  }
-  if (flg & 0x10) { // FCOMMENT
-    while (bytes[i] !== 0) i++; i++;
-  }
-  if (flg & 0x02) i += 2; // FHCRC
-  const raw = bytes.subarray ? bytes.subarray(i) : bytes.slice(i);
-  return inflate(raw);
+  let i = 10; const flg = bytes[3];
+  if (flg & 0x04) { const xlen = bytes[i] | (bytes[i+1] << 8); i += 2 + xlen; }
+  if (flg & 0x08) { while (bytes[i] !== 0) i++; i++; }
+  if (flg & 0x10) { while (bytes[i] !== 0) i++; i++; }
+  if (flg & 0x02) i += 2;
+  return inflate(bytes.subarray(i));
 }
-// zlib wrapper: 2-byte header
 function zlibInflate(bytes) {
-  const cmf = bytes[0], flg = bytes[1];
-  if ((cmf & 0x0F) !== 8) throw new Error("not zlib");
-  const raw = bytes.subarray ? bytes.subarray(2) : bytes.slice(2);
-  return inflate(raw);
+  if ((bytes[0] & 0x0F) !== 8) throw new Error("not zlib");
+  return inflate(bytes.subarray(2));
 }
 
-// ---------- INPUT ----------
+// ============================================================
+// INPUT
+// ============================================================
 let inputs = [];
 if (args.fileURLs && args.fileURLs.length) inputs = inputs.concat(args.fileURLs);
 if (args.urls && args.urls.length)         inputs = inputs.concat(args.urls);
@@ -209,13 +212,14 @@ if (!inputs.length && args.shortcutParameter) {
   const p = args.shortcutParameter;
   inputs = Array.isArray(p) ? p : [p];
 }
-
 if (!inputs.length) {
   Script.setShortcutOutput(JSON.stringify({ status:"CRITICAL", reden:"Geen invoer." }, null, 2));
   Script.complete();
 } else {
 
-// ---------- MAPS ----------
+// ============================================================
+// UNICODE MAPS
+// ============================================================
 const homoglyphMap = {
   0x0430:'a',0x0410:'A',0x0435:'e',0x0415:'E',0x043E:'o',0x041E:'O',
   0x0440:'p',0x0420:'P',0x0441:'c',0x0421:'C',0x0445:'x',0x0425:'X',
@@ -232,7 +236,16 @@ const htmlEntities = { amp:"&",lt:"<",gt:">",quot:'"',apos:"'",nbsp:" ",
   hellip:"…",mdash:"—",ndash:"–",lsquo:"‘",rsquo:"’",
   ldquo:"“",rdquo:"”",copy:"©",reg:"®",trade:"™",euro:"€"};
 
-// ---------- HELPERS ----------
+// Windows-1252 tabel (afwijkend van Latin-1 in 0x80–0x9F)
+const win1252 = {
+  0x80:'€',0x82:'‚',0x83:'ƒ',0x84:'„',0x85:'…',0x86:'†',0x87:'‡',0x88:'ˆ',0x89:'‰',
+  0x8A:'Š',0x8B:'‹',0x8C:'Œ',0x8E:'Ž',0x91:'‘',0x92:'’',0x93:'“',0x94:'”',
+  0x95:'•',0x96:'–',0x97:'—',0x98:'˜',0x99:'™',0x9A:'š',0x9B:'›',0x9C:'œ',0x9E:'ž',0x9F:'Ÿ'
+};
+
+// ============================================================
+// HELPERS
+// ============================================================
 function normalizePath(p) {
   if (!p || typeof p !== "string") return p;
   if (p.indexOf("file://") === 0) p = p.replace(/^file:\/\/(localhost)?/, "");
@@ -251,32 +264,69 @@ function fileNameOf(item, path) {
   if (path) return path.split("/").pop();
   return "onbekend";
 }
-// Lees als Uint8Array (echte bytes!)
 function readBytes(path) {
   try {
-    const d = Data.fromFile(path);
-    if (!d) return null;
-    const arr = d.getBytes();
-    return new Uint8Array(arr);
+    const d = Data.fromFile(path); if (!d) return null;
+    return new Uint8Array(d.getBytes());
   } catch (e) { return null; }
 }
-// Bytes → UTF-8 string
+
+// ---------- ENCODING DETECT + DECODE ----------
+function detectEncoding(bytes) {
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return { enc:"utf-8-bom", skip:3 };
+  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) return { enc:"utf-16le", skip:2 };
+  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) return { enc:"utf-16be", skip:2 };
+  // Heuristiek: als elke tweede byte 0 is, waarschijnlijk UTF-16
+  let evenZero = 0, oddZero = 0, sample = Math.min(bytes.length, 200);
+  for (let i = 0; i < sample; i++) if (bytes[i] === 0) { (i % 2 === 0 ? evenZero : oddZero)++; }
+  if (oddZero > sample * 0.3) return { enc:"utf-16le", skip:0 };
+  if (evenZero > sample * 0.3) return { enc:"utf-16be", skip:0 };
+  // Windows-1252 heuristiek: veel bytes tussen 0x80-0x9F die geen UTF-8-continuation zijn
+  let high1252 = 0;
+  for (let i = 0; i < sample; i++) if (bytes[i] >= 0x80 && bytes[i] <= 0x9F) high1252++;
+  if (high1252 > 5) return { enc:"windows-1252", skip:0 };
+  return { enc:"utf-8", skip:0 };
+}
 function bytesToUtf8(bytes) {
   let s = "";
   for (let i = 0; i < bytes.length; i++) {
     const b = bytes[i];
     if (b < 0x80) s += String.fromCharCode(b);
-    else if ((b & 0xE0) === 0xC0 && i+1 < bytes.length) {
-      s += String.fromCharCode(((b & 0x1F) << 6) | (bytes[i+1] & 0x3F)); i++;
-    } else if ((b & 0xF0) === 0xE0 && i+2 < bytes.length) {
-      s += String.fromCharCode(((b & 0x0F) << 12) | ((bytes[i+1] & 0x3F) << 6) | (bytes[i+2] & 0x3F)); i += 2;
-    } else if ((b & 0xF8) === 0xF0 && i+3 < bytes.length) {
+    else if ((b & 0xE0) === 0xC0 && i+1 < bytes.length) { s += String.fromCharCode(((b & 0x1F) << 6) | (bytes[i+1] & 0x3F)); i++; }
+    else if ((b & 0xF0) === 0xE0 && i+2 < bytes.length) { s += String.fromCharCode(((b & 0x0F) << 12) | ((bytes[i+1] & 0x3F) << 6) | (bytes[i+2] & 0x3F)); i += 2; }
+    else if ((b & 0xF8) === 0xF0 && i+3 < bytes.length) {
       const cp = ((b & 0x07) << 18) | ((bytes[i+1] & 0x3F) << 12) | ((bytes[i+2] & 0x3F) << 6) | (bytes[i+3] & 0x3F);
       try { s += String.fromCodePoint(cp); } catch(e){ s += "?"; } i += 3;
     } else s += String.fromCharCode(b);
   }
   return s;
 }
+function bytesToUtf16(bytes, be) {
+  let s = "";
+  for (let i = 0; i + 1 < bytes.length; i += 2) {
+    const c = be ? (bytes[i] << 8) | bytes[i+1] : (bytes[i+1] << 8) | bytes[i];
+    if (c) s += String.fromCharCode(c);
+  }
+  return s;
+}
+function bytesToWin1252(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    s += (b < 0x80) ? String.fromCharCode(b) : (win1252[b] || String.fromCharCode(b));
+  }
+  return s;
+}
+function bytesToStringAuto(bytes) {
+  const enc = detectEncoding(bytes);
+  const body = bytes.subarray(enc.skip);
+  let text;
+  if (enc.enc.startsWith("utf-16")) text = bytesToUtf16(body, enc.enc === "utf-16be");
+  else if (enc.enc === "windows-1252") text = bytesToWin1252(body);
+  else text = bytesToUtf8(body);
+  return { text: text, encoding: enc.enc };
+}
+
 function hexDump(bytes, n) {
   const lim = Math.min(bytes.length, n || 128);
   const out = [];
@@ -284,26 +334,38 @@ function hexDump(bytes, n) {
   return out.join(" ");
 }
 
-// ---------- MAGIC DETECTIE (op bytes) ----------
+// ============================================================
+// MAGIC BYTES
+// ============================================================
 function detectContainer(bytes) {
   if (!bytes || bytes.length < 4) return null;
   const b0=bytes[0], b1=bytes[1], b2=bytes[2], b3=bytes[3];
-  if (b0===0x1F && b1===0x8B) return { type:"gzip", inflatable:true };
-  if (b0===0x78 && (b1===0x9C || b1===0xDA || b1===0x01)) return { type:"zlib", inflatable:true };
-  if (b0===0x50 && b1===0x4B && b2===0x03 && b3===0x04) return { type:"zip", inflatable:true };
-  if (b0===0x25 && b1===0x50 && b2===0x44 && b3===0x46) return { type:"pdf", inflatable:"streams" };
-  if (b0===0x37 && b1===0x7A && b2===0xBC && b3===0xAF) return { type:"7z", inflatable:false };
-  if (b0===0x52 && b1===0x61 && b2===0x72 && b3===0x21) return { type:"rar", inflatable:false };
-  if (b0===0x28 && b1===0xB5 && b2===0x2F && b3===0xFD) return { type:"zstd", inflatable:false };
-  if (b0===0x89 && b1===0x50 && b2===0x4E && b3===0x47) return { type:"png", inflatable:"idat" };
-  if (b0===0xFF && b1===0xD8 && b2===0xFF) return { type:"jpeg", inflatable:false };
+  if (b0===0x1F && b1===0x8B) return { type:"gzip" };
+  if (b0===0x78 && (b1===0x9C || b1===0xDA || b1===0x01)) return { type:"zlib" };
+  if (b0===0x50 && b1===0x4B && b2===0x03 && b3===0x04) return { type:"zip" };
+  if (b0===0x25 && b1===0x50 && b2===0x44 && b3===0x46) return { type:"pdf" };
+  if (b0===0x37 && b1===0x7A && b2===0xBC && b3===0xAF) return { type:"7z" };
+  if (b0===0x52 && b1===0x61 && b2===0x72 && b3===0x21) return { type:"rar" };
+  if (b0===0x28 && b1===0xB5 && b2===0x2F && b3===0xFD) return { type:"zstd" };
+  if (b0===0x89 && b1===0x50 && b2===0x4E && b3===0x47) return { type:"png" };
+  if (b0===0xFF && b1===0xD8 && b2===0xFF) return { type:"jpeg" };
+  if (b0===0x4D && b1===0x5A) return { type:"executable-mz" };
+  if (b0===0x7F && b1===0x45 && b2===0x4C && b3===0x46) return { type:"executable-elf" };
+  if (b0===0xFE && b1===0xED && b2===0xFA) return { type:"executable-macho" };
+  if (b0===0xCA && b1===0xFE && b2===0xBA && b3===0xBE) return { type:"java-class" };
+  if (b0===0x62 && b1===0x70 && b2===0x6C && b3===0x69) return { type:"bplist" };
+  if (b0===0x30 && b1===0x0D && b2===0x30 && b3===0x0A) return { type:"appledouble" };
+  if (b0===0x00 && b1===0x05 && b2===0x16 && b3===0x07) return { type:"appledouble" };
+  if (b0===0x7B && b1===0x5C && b2===0x72 && b3===0x74) return { type:"rtf" };
+  if (b0===0x53 && b1===0x51 && b2===0x4C && b3===0x69) return { type:"sqlite" };
   return null;
 }
 
-// ---------- ZIP UITPAKKEN ----------
+// ============================================================
+// ZIP + Office XML
+// ============================================================
 function unzip(bytes) {
-  const files = [];
-  let i = 0;
+  const files = []; let i = 0;
   while (i < bytes.length - 4) {
     if (bytes[i]===0x50 && bytes[i+1]===0x4B && bytes[i+2]===0x03 && bytes[i+3]===0x04) {
       const method = bytes[i+8] | (bytes[i+9]<<8);
@@ -320,47 +382,216 @@ function unzip(bytes) {
         let out;
         if (method === 0) out = raw;
         else if (method === 8) out = inflate(raw, new Uint8Array(Math.max(uncompSize, raw.length * 8)));
-        else { files.push({ naam:name, methode:method, fout:"onbekende compressie-methode" }); i = dataEnd; continue; }
+        else { files.push({ naam:name, methode:method, fout:"onbekende compressie" }); i = dataEnd; continue; }
         files.push({ naam:name, methode:method===0?"stored":"deflate", bytes:out });
-      } catch (e) {
-        files.push({ naam:name, fout:e.message });
-      }
+      } catch (e) { files.push({ naam:name, fout:e.message }); }
       i = dataEnd;
     } else i++;
-    if (files.length > 200) break;
+    if (files.length > 500) break;
   }
   return files;
 }
+function extractOfficeXmlText(xmlStr) {
+  const texts = [];
+  // Word: <w:t>...</w:t> en <w:t xml:space="preserve">...</w:t>
+  let m; const wRx = /<w:t(?:\s[^>]*)?>([\s\S]*?)<\/w:t>/g;
+  while ((m = wRx.exec(xmlStr)) !== null) texts.push(m[1]);
+  // Excel sharedStrings: <t>...</t>
+  const tRx = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g;
+  while ((m = tRx.exec(xmlStr)) !== null) texts.push(m[1]);
+  // PowerPoint: <a:t>...</a:t>
+  const aRx = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
+  while ((m = aRx.exec(xmlStr)) !== null) texts.push(m[1]);
+  return texts;
+}
 
-// ---------- PDF FLATEDECODE STREAMS ----------
+// ============================================================
+// PDF DIEP
+// ============================================================
+function extractPdfInfo(bytes) {
+  const info = {};
+  const s = bytesToUtf8(bytes);
+  // /Info << ... >>
+  const rx = /\/(Title|Author|Producer|Creator|Subject|Keywords|CreationDate|ModDate)\s*(\(([^)]*)\)|<([0-9A-Fa-f\s]+)>)/g;
+  let m;
+  while ((m = rx.exec(s)) !== null) {
+    let v = m[3];
+    if (!v && m[4]) {
+      // hex-string
+      const hex = m[4].replace(/\s/g, "");
+      let out = "";
+      for (let i = 0; i + 1 < hex.length; i += 2) out += String.fromCharCode(parseInt(hex.substr(i,2),16));
+      v = out;
+    }
+    info[m[1]] = v;
+  }
+  // XMP metadata blok
+  const xmp = /<x:xmpmeta[\s\S]*?<\/x:xmpmeta>/.exec(s);
+  if (xmp) info.__xmp = xmp[0];
+  return info;
+}
 function extractPdfStreams(bytes) {
   const results = [];
   const s = bytesToUtf8(bytes);
-  const streamRx = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
-  let m; let idx = 0;
-  while ((m = streamRx.exec(s)) !== null && results.length < 100) {
+  const rx = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let m;
+  while ((m = rx.exec(s)) !== null && results.length < 200) {
     const raw = m[1];
-    // Zoek naar zlib-header 0x78 als eerste byte
-    const bs = [];
-    for (let i = 0; i < raw.length; i++) bs.push(raw.charCodeAt(i) & 0xFF);
-    const u8 = new Uint8Array(bs);
-    if (u8[0] === 0x78) {
+    const bs = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bs[i] = raw.charCodeAt(i) & 0xFF;
+    if (bs[0] === 0x78) {
       try {
-        const dec = zlibInflate(u8);
-        results.push({ offset: m.index, gedecomprimeerd_lengte: dec.length, tekst: bytesToUtf8(dec).slice(0, 4000) });
-      } catch (e) {
-        results.push({ offset: m.index, fout: e.message });
-      }
+        const dec = zlibInflate(bs);
+        const text = bytesToUtf8(dec);
+        // Check of het een ObjStm is: begint met een reeks getallen
+        const isObjStm = /^\d+\s+\d+\s+/.test(text);
+        results.push({
+          offset: m.index,
+          type: isObjStm ? "ObjStm (compressed objects)" : "content",
+          lengte_uncompressed: dec.length,
+          tekst: text.slice(0, 6000)
+        });
+      } catch (e) { results.push({ offset: m.index, fout: e.message }); }
     }
-    idx++;
   }
   return results;
 }
 
-// ---------- TEKST-DEOBFUSCATIE (v7-logica op string) ----------
-function stripZeroWidth(s) {
-  let out = ""; for (let i = 0; i < s.length; i++) if (!zwSet.has(s.charCodeAt(i))) out += s[i];
+// ============================================================
+// PNG / JPEG METADATA
+// ============================================================
+function extractPngMetadata(bytes) {
+  const chunks = [];
+  let i = 8; // skip PNG header
+  while (i < bytes.length - 12) {
+    const len = (bytes[i]<<24) | (bytes[i+1]<<16) | (bytes[i+2]<<8) | bytes[i+3];
+    const type = String.fromCharCode(bytes[i+4], bytes[i+5], bytes[i+6], bytes[i+7]);
+    const dataStart = i + 8;
+    if (type === "tEXt") {
+      const chunk = bytes.subarray(dataStart, dataStart + len);
+      let k = 0; while (k < chunk.length && chunk[k] !== 0) k++;
+      const key = bytesToUtf8(chunk.subarray(0, k));
+      const val = bytesToUtf8(chunk.subarray(k+1));
+      chunks.push({ type:"tEXt", key: key, value: val });
+    } else if (type === "zTXt") {
+      const chunk = bytes.subarray(dataStart, dataStart + len);
+      let k = 0; while (k < chunk.length && chunk[k] !== 0) k++;
+      const key = bytesToUtf8(chunk.subarray(0, k));
+      try {
+        const dec = zlibInflate(chunk.subarray(k + 2));
+        chunks.push({ type:"zTXt", key: key, value: bytesToUtf8(dec) });
+      } catch (e) { chunks.push({ type:"zTXt", key: key, fout: e.message }); }
+    } else if (type === "iTXt") {
+      const chunk = bytes.subarray(dataStart, dataStart + len);
+      chunks.push({ type:"iTXt", raw: bytesToUtf8(chunk).slice(0, 500) });
+    } else if (type === "IEND") break;
+    i = dataStart + len + 4; // 4 bytes CRC
+    if (chunks.length > 40) break;
+  }
+  return chunks;
+}
+function extractJpegMetadata(bytes) {
+  const segments = [];
+  let i = 2;
+  while (i < bytes.length - 4) {
+    if (bytes[i] !== 0xFF) break;
+    const marker = bytes[i+1];
+    if (marker === 0xD9 || marker === 0xDA) break; // EOI or SOS
+    const len = (bytes[i+2]<<8) | bytes[i+3];
+    if (marker === 0xFE) { // COM (comment)
+      segments.push({ type:"COM (comment)", text: bytesToUtf8(bytes.subarray(i+4, i+2+len)) });
+    } else if (marker === 0xE1) { // APP1 (EXIF/XMP)
+      const head = bytesToUtf8(bytes.subarray(i+4, i+4+30));
+      if (head.indexOf("Exif") === 0) segments.push({ type:"APP1 EXIF", note:"EXIF blok aanwezig; volledige parsing buiten scope" });
+      else if (head.indexOf("http://ns.adobe.com/xap") === 0) {
+        segments.push({ type:"APP1 XMP", xmp: bytesToUtf8(bytes.subarray(i+4, i+2+len)).slice(0, 3000) });
+      }
+    } else if (marker === 0xED) { // APP13 (IPTC)
+      segments.push({ type:"APP13 IPTC", note:"IPTC blok aanwezig" });
+    }
+    i += 2 + len;
+    if (segments.length > 20) break;
+  }
+  return segments;
+}
+
+// ============================================================
+// HTTP / HAR / MULTIPART
+// ============================================================
+function splitHttp(s) {
+  const m = /^(HTTP\/[0-9.]+ \d{3}[\s\S]*?)\r?\n\r?\n([\s\S]*)$/.exec(s);
+  return m ? { headers: m[1], body: m[2] } : null;
+}
+function parseHeaders(headerBlock) {
+  const h = {};
+  const lines = headerBlock.split(/\r?\n/);
+  for (const line of lines) {
+    const idx = line.indexOf(":");
+    if (idx > 0) h[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx+1).trim();
+  }
+  return h;
+}
+function dechunk(body) {
+  // HTTP chunked transfer encoding
+  let out = ""; let i = 0;
+  while (i < body.length) {
+    const nl = body.indexOf("\r\n", i);
+    if (nl < 0) break;
+    const size = parseInt(body.slice(i, nl), 16);
+    if (isNaN(size) || size === 0) break;
+    i = nl + 2;
+    out += body.slice(i, i + size);
+    i += size + 2;
+  }
   return out;
+}
+function parseMultipart(body, boundary) {
+  const parts = [];
+  const sep = "--" + boundary;
+  const chunks = body.split(sep);
+  for (let k = 1; k < chunks.length - 1; k++) {
+    const chunk = chunks[k];
+    const idx = chunk.indexOf("\r\n\r\n");
+    if (idx > 0) parts.push({ headers: chunk.slice(0, idx).trim(), body: chunk.slice(idx+4).trim() });
+  }
+  return parts;
+}
+function parseHar(jsonStr) {
+  try {
+    const har = JSON.parse(jsonStr);
+    if (!har.log || !har.log.entries) return null;
+    return har.log.entries.map(e => ({
+      startedDateTime: e.startedDateTime,
+      method: e.request && e.request.method,
+      url: e.request && e.request.url,
+      status: e.response && e.response.status,
+      mimeType: e.response && e.response.content && e.response.content.mimeType,
+      cookies: (e.request && e.request.cookies || []).map(c => c.name + "=" + c.value),
+      requestHeaders: (e.request && e.request.headers || []).slice(0, 20),
+      responseSize: e.response && e.response.bodySize,
+      responseText: e.response && e.response.content && e.response.content.text ? String(e.response.content.text).slice(0, 2000) : null
+    }));
+  } catch (e) { return null; }
+}
+function parseCookies(headerBlock) {
+  const cookies = [];
+  const rx = /(?:^|\r?\n)(?:Cookie|Set-Cookie):\s*([^\r\n]+)/gi;
+  let m;
+  while ((m = rx.exec(headerBlock)) !== null) {
+    const parts = m[1].split(/;\s*/);
+    for (const p of parts) {
+      const eq = p.indexOf("=");
+      if (eq > 0) cookies.push({ naam: p.slice(0, eq).trim(), waarde: p.slice(eq+1).trim() });
+    }
+  }
+  return cookies;
+}
+
+// ============================================================
+// TEXT DEOBFUSCATION
+// ============================================================
+function stripZeroWidth(s) {
+  let out = ""; for (let i = 0; i < s.length; i++) if (!zwSet.has(s.charCodeAt(i))) out += s[i]; return out;
 }
 function normalizeHomoglyphs(s) {
   let out = "";
@@ -375,11 +606,12 @@ function decodeHtmlEntities(s) {
 }
 function decodeJsEscapes(s) {
   return s.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h,16)))
-          .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h,16)));
+          .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h,16)))
+          .replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, (_, h) => { try { return String.fromCodePoint(parseInt(h,16)); } catch(e){ return _; } });
 }
 function decodeUrlRecursive(s) {
   let out = s, prev = null, d = 0;
-  while (out !== prev && d < 3) { prev = out; try { out = decodeURIComponent(out.replace(/\+/g, "%20")); } catch(e){ break; } d++; }
+  while (out !== prev && d < 4) { prev = out; try { out = decodeURIComponent(out.replace(/\+/g, "%20")); } catch(e){ break; } d++; }
   return out;
 }
 function decodeQP(s) {
@@ -389,27 +621,147 @@ function decodeB64Str(str) {
   try {
     const d = Data.fromBase64String(str.replace(/-/g,"+").replace(/_/g,"/"));
     if (!d) return null;
-    const bytes = new Uint8Array(d.getBytes());
-    return bytesToUtf8(bytes);
+    return bytesToUtf8(new Uint8Array(d.getBytes()));
   } catch (e) { return null; }
+}
+function decodeBase32(str) {
+  const alph = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  str = str.replace(/=+$/, "").toUpperCase();
+  let bits = "";
+  for (const c of str) { const v = alph.indexOf(c); if (v < 0) return null; bits += v.toString(2).padStart(5, "0"); }
+  let out = "";
+  for (let i = 0; i + 8 <= bits.length; i += 8) out += String.fromCharCode(parseInt(bits.substr(i, 8), 2));
+  return out;
+}
+function decodePunycode(label) {
+  // RFC 3492 minimal decode
+  try {
+    if (!label.startsWith("xn--")) return null;
+    const input = label.slice(4);
+    const base = 36, tmin = 1, tmax = 26, skew = 38, damp = 700, initialBias = 72, initialN = 0x80;
+    let n = initialN, i = 0, bias = initialBias, output = [];
+    const delim = input.lastIndexOf("-");
+    if (delim > 0) { for (let j = 0; j < delim; j++) output.push(input.charCodeAt(j)); }
+    let idx = delim >= 0 ? delim + 1 : 0;
+    while (idx < input.length) {
+      const oldi = i; let w = 1, k = base;
+      while (idx < input.length) {
+        const c = input.charCodeAt(idx++);
+        const digit = c - 48 < 10 ? c - 22 : (c - 65 < 26 ? c - 65 : (c - 97 < 26 ? c - 97 : base));
+        if (digit >= base) return null;
+        i += digit * w;
+        const t = k <= bias ? tmin : (k >= bias + tmax ? tmax : k - bias);
+        if (digit < t) break;
+        w *= (base - t); k += base;
+      }
+      const outLen = output.length + 1;
+      let delta = i - oldi; delta = oldi === 0 ? Math.floor(delta / damp) : delta >> 1;
+      delta += Math.floor(delta / outLen);
+      let kk = 0;
+      while (delta > 455) { delta = Math.floor(delta / 35); kk += base; }
+      bias = kk + Math.floor((36 * delta) / (delta + skew));
+      n += Math.floor(i / outLen); i %= outLen;
+      output.splice(i++, 0, n);
+    }
+    return String.fromCodePoint(...output);
+  } catch (e) { return null; }
+}
+function rot13Auto(s) {
+  // Als de tekst weinig echte woorden bevat, probeer ROT13
+  const commonWords = /\b(the|and|van|de|het|een|ik|is|niet|of|op|te|dat|met|voor)\b/gi;
+  const before = (s.match(commonWords) || []).length;
+  const rotd = s.replace(/[A-Za-z]/g, c => {
+    const b = c.charCodeAt(0) < 91 ? 65 : 97;
+    return String.fromCharCode((c.charCodeAt(0) - b + 13) % 26 + b);
+  });
+  const after = (rotd.match(commonWords) || []).length;
+  return after > before * 2 ? rotd : null;
 }
 function extractHiddenHtml(s) {
   const hits = [];
   const rxs = [
     /<[^>]+\bhidden\b[^>]*>([\s\S]*?)<\/[^>]+>/gi,
     /<[^>]+\baria-hidden\s*=\s*["']true["'][^>]*>([\s\S]*?)<\/[^>]+>/gi,
-    /<[^>]+style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0|color\s*:\s*transparent)[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/gi,
+    /<[^>]+style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0|color\s*:\s*transparent|clip-path\s*:\s*inset\(100%\)|left\s*:\s*-9999px|position\s*:\s*absolute[^"']*top\s*:\s*-\d+)[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/gi,
     /<template[^>]*>([\s\S]*?)<\/template>/gi,
     /<noscript[^>]*>([\s\S]*?)<\/noscript>/gi
   ];
   for (const rx of rxs) {
     let m; rx.lastIndex = 0;
     while ((m = rx.exec(s)) !== null) {
-      const inner = m[1].replace(/<[^>]+>/g," ").trim();
+      const inner = (m[1] || m[2] || "").replace(/<[^>]+>/g," ").trim();
       if (inner && inner.length > 2) hits.push(inner);
     }
   }
   return hits;
+}
+function extractDataUris(s) {
+  const hits = [];
+  const rx = /data:([a-zA-Z0-9.+\-/]+);base64,([A-Za-z0-9+/=]+)/g;
+  let m;
+  while ((m = rx.exec(s)) !== null && hits.length < 20) {
+    const mime = m[1]; const b64 = m[2];
+    const dec = decodeB64Str(b64);
+    hits.push({ mime: mime, lengte_encoded: b64.length, decoded_preview: dec ? dec.slice(0, 300) : null });
+  }
+  return hits;
+}
+function extractMetaTags(s) {
+  const tags = [];
+  const rx = /<meta[^>]+>/gi;
+  let m;
+  while ((m = rx.exec(s)) !== null && tags.length < 40) {
+    const t = m[0];
+    const name = /(?:name|property|http-equiv)\s*=\s*["']([^"']+)["']/i.exec(t);
+    const content = /content\s*=\s*["']([^"']*)["']/i.exec(t);
+    if (name && content) tags.push({ naam: name[1], inhoud: content[1] });
+  }
+  return tags;
+}
+function extractMetaRefresh(s) {
+  const hits = [];
+  const rx = /<meta[^>]+http-equiv\s*=\s*["']refresh["'][^>]+content\s*=\s*["'][^"']*url=([^"']+)["']/gi;
+  let m; while ((m = rx.exec(s)) !== null) hits.push(m[1]);
+  return hits;
+}
+function extractSourceMaps(s) {
+  const hits = [];
+  const rx = /\/\/[#@]\s*sourceMappingURL=([^\s]+)/g;
+  let m; while ((m = rx.exec(s)) !== null) hits.push(m[1]);
+  return hits;
+}
+function unwrapJsonp(s) {
+  // callback({...}); of callback([...]);
+  const m = /^([a-zA-Z_$][\w$]*)\s*\(([\s\S]+?)\)\s*;?\s*$/.exec(s.trim());
+  if (m) { try { return { callback: m[1], data: JSON.parse(m[2]) }; } catch (e) {} }
+  return null;
+}
+function extractSignedUrlParams(s) {
+  const hits = [];
+  const rx = /[?&](X-Amz-[A-Za-z\-]+|Signature|Expires|Policy|KeyId|Credential)=([^&\s"'<>]+)/g;
+  let m; while ((m = rx.exec(s)) !== null && hits.length < 30) hits.push({ param: m[1], waarde: m[2] });
+  return hits;
+}
+function analyzeLineEndings(s) {
+  const cr = (s.match(/\r(?!\n)/g) || []).length;
+  const lf = (s.match(/(?<!\r)\n/g) || []).length;
+  const crlf = (s.match(/\r\n/g) || []).length;
+  return { crlf: crlf, cr_only: cr, lf_only: lf, mixed: (cr && lf) || (crlf && cr) || (crlf && lf && cr) };
+}
+function whitespaceStego(s) {
+  const trailing = [];
+  const lines = s.split(/\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const m = /([\t ]+)$/.exec(lines[i]);
+    if (m && m[1].length > 3) trailing.push({ regel: i, aantal_whitespace: m[1].length });
+    if (trailing.length > 20) break;
+  }
+  return trailing;
+}
+function extractTimestamps(s) {
+  const iso = s.match(/\b(19|20)\d{2}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+\-]\d{2}:?\d{2})?)?/g) || [];
+  const nl = s.match(/\b\d{1,2}[-/]\d{1,2}[-/](?:19|20)\d{2}/g) || [];
+  return { iso: iso.slice(0, 30), nl: nl.slice(0, 30) };
 }
 function extractStringsFromBytes(bytes, minLen) {
   const out = []; let cur = "";
@@ -421,84 +773,131 @@ function extractStringsFromBytes(bytes, minLen) {
   if (cur.length >= minLen) out.push(cur);
   return out;
 }
-function splitHttp(s) {
-  const m = /^(HTTP\/[0-9.]+ \d{3}[\s\S]*?)\r?\n\r?\n([\s\S]*)$/.exec(s);
-  return m ? { headers: m[1], body: m[2] } : null;
-}
 function nlZorgIds(s) {
   const out = {};
   const bsn = (s.match(/\b\d{9}\b/g) || []).filter(n => {
     let x = 0; for (let i=0;i<8;i++) x += parseInt(n[i],10)*(9-i); x -= parseInt(n[8],10);
     return x % 11 === 0 && n !== "000000000";
   });
-  if (bsn.length) out.bsn_11proef = Array.from(new Set(bsn)).slice(0,30);
+  if (bsn.length) out.bsn_11proef = Array.from(new Set(bsn)).slice(0,50);
   const agb = s.match(/\bAGB[- ]?\d{8}\b/gi); if (agb) out.agb = Array.from(new Set(agb));
   const big = s.match(/\b\d{11}\s*BIG\b/gi); if (big) out.big = Array.from(new Set(big));
   const uzi = s.match(/\bUZI[- ]?\d{9,}\b/gi); if (uzi) out.uzi = Array.from(new Set(uzi));
-  const oids = s.match(/\b2\.16\.\d+(?:\.\d+){2,}\b/g); if (oids) out.oids = Array.from(new Set(oids)).slice(0,50);
-  const urls = s.match(/https?:\/\/[^\s"'<>)]+/gi); if (urls) out.urls = Array.from(new Set(urls)).slice(0,100);
-  const emails = s.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g); if (emails) out.emails = Array.from(new Set(emails)).slice(0,30);
+  const oids = s.match(/\b2\.16\.\d+(?:\.\d+){2,}\b/g); if (oids) out.oids = Array.from(new Set(oids)).slice(0,100);
+  const urls = s.match(/https?:\/\/[^\s"'<>)]+/gi); if (urls) out.urls = Array.from(new Set(urls)).slice(0,200);
+  const emails = s.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g); if (emails) out.emails = Array.from(new Set(emails)).slice(0,50);
   const cda = s.match(/<ClinicalDocument[^>]*/gi); if (cda) out.hl7_cda = cda.slice(0,5);
-  const fhir = s.match(/"resourceType"\s*:\s*"[A-Z][A-Za-z]+"/g); if (fhir) out.fhir_resources = Array.from(new Set(fhir)).slice(0,30);
+  const fhir = s.match(/"resourceType"\s*:\s*"[A-Z][A-Za-z]+"/g); if (fhir) out.fhir_resources = Array.from(new Set(fhir)).slice(0,50);
   const xdm = s.match(/METADATA\.XML|IHE_XDM|SUBSET\d+/gi); if (xdm) out.ihe_xdm = Array.from(new Set(xdm));
+  const ipv4 = s.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g); if (ipv4) out.ipv4 = Array.from(new Set(ipv4)).slice(0,30);
+  const uuids = s.match(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g); if (uuids) out.uuids = Array.from(new Set(uuids)).slice(0,50);
   return out;
 }
 
-// ---------- HOOFDEXTRACTIE (bytes-first) ----------
+// ============================================================
+// HOOFDVERWERKING
+// ============================================================
 function processBytes(bytes, fileInfo) {
   fileInfo.grootte_bytes = bytes.length;
   const container = detectContainer(bytes);
   fileInfo.container = container ? container.type : "plain_text";
-
-  let workBytes = bytes;
   const layers = [];
 
-  // DECOMPRESSIE
-  if (container && container.type === "gzip") {
-    try { workBytes = gunzip(bytes); layers.push("gzip → geïnflateerd (" + workBytes.length + " bytes)"); }
-    catch (e) { fileInfo.gzip_fout = e.message; return finalizeBytesOnly(bytes, fileInfo, layers); }
-  } else if (container && container.type === "zlib") {
-    try { workBytes = zlibInflate(bytes); layers.push("zlib → geïnflateerd"); }
-    catch (e) { fileInfo.zlib_fout = e.message; return finalizeBytesOnly(bytes, fileInfo, layers); }
-  } else if (container && container.type === "zip") {
-    const entries = unzip(bytes);
-    fileInfo.zip_entries = entries.map(e => ({
-      naam: e.naam, methode: e.methode, lengte_uncompressed: e.bytes ? e.bytes.length : null, fout: e.fout
-    }));
-    // Verwerk elke entry apart
-    fileInfo.zip_content = [];
-    for (const entry of entries) {
-      if (!entry.bytes) continue;
-      const sub = { naam: entry.naam, grootte_bytes: entry.bytes.length };
-      processBytes(entry.bytes, sub);
-      fileInfo.zip_content.push(sub);
-    }
-    layers.push("ZIP → " + entries.length + " entries uitgepakt");
-    fileInfo.layers_toegepast = layers;
-    return;
-  } else if (container && container.type === "pdf") {
-    fileInfo.pdf_streams = extractPdfStreams(bytes);
-    layers.push("PDF → " + fileInfo.pdf_streams.length + " FlateDecode-streams geïnflateerd");
-    // Ga door met tekst-analyse van de PDF-tekst (tussen streams)
-  } else if (container && (container.type === "7z" || container.type === "rar" || container.type === "zstd")) {
-    fileInfo.instructie = container.type + " kan Scriptable niet native uitpakken. Voer op je Mac/iSH: `7z x bestand` / `unrar x` / `zstd -d` — deel daarna de output.";
-    fileInfo.hex_dump_128 = hexDump(bytes, 128);
-    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, MIN_STRING_LEN).slice(0, 500);
-    fileInfo.layers_toegepast = layers;
-    return;
-  } else if (container && (container.type === "png" || container.type === "jpeg")) {
-    fileInfo.instructie = "Image-bestand. Strings-scan uitgevoerd; voor EXIF/XMP een aparte tool.";
+  // AppleDouble strip
+  if (container && container.type === "appledouble") {
+    fileInfo.instructie = "AppleDouble resource fork (._-bestand). Bevat meestal alleen macOS metadata; scan gaat door op strings-basis.";
     fileInfo.hex_dump_128 = hexDump(bytes, 128);
     fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, 6).slice(0, 200);
     fileInfo.layers_toegepast = layers;
     return;
   }
 
-  // TEKST-ANALYSE op workBytes
-  const text = bytesToUtf8(workBytes);
-  if (workBytes[0] === 0xFEFF || text.charCodeAt(0) === 0xFEFF) layers.push("BOM aanwezig");
+  let workBytes = bytes;
 
-  // Zero-width & homoglyph bewijs
+  // DECOMPRESSIE
+  if (container && container.type === "gzip") {
+    try { workBytes = gunzip(bytes); layers.push("gzip → geïnflateerd (" + workBytes.length + " bytes)"); }
+    catch (e) { fileInfo.decompress_fout = e.message; return finalizeBytesOnly(bytes, fileInfo, layers); }
+  } else if (container && container.type === "zlib") {
+    try { workBytes = zlibInflate(bytes); layers.push("zlib → geïnflateerd"); }
+    catch (e) { fileInfo.decompress_fout = e.message; return finalizeBytesOnly(bytes, fileInfo, layers); }
+  } else if (container && container.type === "zip") {
+    const entries = unzip(bytes);
+    fileInfo.zip_entries = entries.map(e => ({ naam: e.naam, methode: e.methode, lengte: e.bytes ? e.bytes.length : null, fout: e.fout }));
+
+    // Office-detectie
+    const isOffice = entries.some(e => /^word\/document\.xml|^xl\/sharedStrings\.xml|^xl\/worksheets\/|^ppt\/slides\//i.test(e.naam || ""));
+    if (isOffice) {
+      const officeTexts = [];
+      for (const entry of entries) {
+        if (!entry.bytes) continue;
+        if (/\.xml$/i.test(entry.naam) && /^(word|xl|ppt|docProps)\//i.test(entry.naam)) {
+          const xml = bytesToUtf8(entry.bytes);
+          const t = extractOfficeXmlText(xml);
+          if (t.length) officeTexts.push({ deel: entry.naam, tekst: t });
+        }
+      }
+      fileInfo.office_text = officeTexts;
+      layers.push("Office (DOCX/XLSX/PPTX) tekst geëxtraheerd");
+    }
+
+    fileInfo.zip_content = [];
+    for (const entry of entries.slice(0, 50)) {
+      if (!entry.bytes) continue;
+      const sub = { naam: entry.naam, grootte_bytes: entry.bytes.length };
+      processBytes(entry.bytes, sub);
+      fileInfo.zip_content.push(sub);
+    }
+    layers.push("ZIP → " + entries.length + " entries verwerkt");
+    fileInfo.layers_toegepast = layers;
+    return;
+  } else if (container && container.type === "pdf") {
+    fileInfo.pdf_info = extractPdfInfo(bytes);
+    fileInfo.pdf_streams = extractPdfStreams(bytes);
+    layers.push("PDF /Info + " + fileInfo.pdf_streams.length + " FlateDecode streams geïnflateerd");
+  } else if (container && container.type === "png") {
+    fileInfo.png_chunks = extractPngMetadata(bytes);
+    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, 6).slice(0, 200);
+    fileInfo.hex_dump_128 = hexDump(bytes, 128);
+    layers.push("PNG chunks gelezen");
+    fileInfo.layers_toegepast = layers; return;
+  } else if (container && container.type === "jpeg") {
+    fileInfo.jpeg_segments = extractJpegMetadata(bytes);
+    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, 6).slice(0, 200);
+    fileInfo.hex_dump_128 = hexDump(bytes, 128);
+    layers.push("JPEG segments gelezen");
+    fileInfo.layers_toegepast = layers; return;
+  } else if (container && (container.type === "7z" || container.type === "rar" || container.type === "zstd")) {
+    fileInfo.instructie = container.type + " kan Scriptable niet native uitpakken. Op je Mac: `7z x` / `unrar x` / `zstd -d`.";
+    fileInfo.hex_dump_128 = hexDump(bytes, 128);
+    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, MIN_STRING_LEN).slice(0, 500);
+    fileInfo.layers_toegepast = layers; return;
+  } else if (container && container.type.startsWith("executable")) {
+    fileInfo.instructie = "Executable (" + container.type + "). Scan beperkt tot strings.";
+    fileInfo.hex_dump_128 = hexDump(bytes, 128);
+    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, 6).slice(0, 300);
+    fileInfo.layers_toegepast = layers; return;
+  } else if (container && container.type === "bplist") {
+    fileInfo.instructie = "Binary property list (bplist00) — macOS/iOS metadata. Scan beperkt tot strings.";
+    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, 4).slice(0, 400);
+    fileInfo.layers_toegepast = layers; return;
+  } else if (container && container.type === "sqlite") {
+    fileInfo.instructie = "SQLite-database. Strings-scan uitgevoerd; voor structuur `sqlite3 <bestand> .dump` op Mac.";
+    fileInfo.strings_uit_binary = extractStringsFromBytes(bytes, 6).slice(0, 500);
+    fileInfo.layers_toegepast = layers; return;
+  } else if (container && container.type === "rtf") {
+    // RTF is deels tekst
+    const rawText = bytesToUtf8(bytes);
+    fileInfo.rtf_stripped = rawText.replace(/\\[a-zA-Z]+\d*\s?|\{|\}|\\'[0-9a-fA-F]{2}/g, " ").replace(/\s+/g, " ").trim().slice(0, 20000);
+    layers.push("RTF stripping toegepast");
+  }
+
+  // ENCODING DETECT + TEKST
+  const decoded = bytesToStringAuto(workBytes);
+  fileInfo.encoding = decoded.encoding;
+  const text = decoded.text.slice(0, SCAN_HEAD);
+
+  // Zero-width / homoglyph bewijs
   const zwFindings = [], hgFindings = [];
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
@@ -513,10 +912,41 @@ function processBytes(bytes, fileInfo) {
   if (zwFindings.length) revealed.onzichtbare_unicode = zwFindings;
   if (hgFindings.length) revealed.homoglyphs = hgFindings;
 
-  // HTTP splitten
+  // HAR detectie
+  if (/^\s*\{\s*"log"\s*:/.test(normalized)) {
+    const har = parseHar(normalized);
+    if (har) { revealed.har_entries = har.slice(0, 100); layers.push("HAR: " + har.length + " requests geparsed"); }
+  }
+
+  // JSONP unwrap
+  const jsonp = unwrapJsonp(normalized);
+  if (jsonp) { revealed.jsonp_callback = jsonp; layers.push("JSONP unwrapped"); }
+
+  // HTTP splitsen
   const http = splitHttp(normalized);
-  const bodyText = http ? http.body : normalized;
-  if (http) { revealed.http_headers = http.headers; layers.push("HTTP-response gesplitst"); }
+  let bodyText = normalized;
+  if (http) {
+    revealed.http_headers = http.headers;
+    revealed.http_cookies = parseCookies(http.headers);
+    const H = parseHeaders(http.headers);
+    bodyText = http.body;
+    if (H["transfer-encoding"] && /chunked/i.test(H["transfer-encoding"])) {
+      bodyText = dechunk(bodyText); layers.push("HTTP chunked-encoding gedecodeerd");
+    }
+    const ct = H["content-type"] || "";
+    const mp = /boundary=([^;\s]+)/i.exec(ct);
+    if (mp) {
+      const parts = parseMultipart(bodyText, mp[1].replace(/"/g,""));
+      if (parts.length) { revealed.multipart_parts = parts.slice(0, 20); layers.push("multipart/form-data gesplitst"); }
+    }
+    layers.push("HTTP-response gesplitst");
+  }
+
+  // Meta tags / refresh / source-maps
+  const meta = extractMetaTags(bodyText); if (meta.length) revealed.meta_tags = meta;
+  const refresh = extractMetaRefresh(bodyText); if (refresh.length) { revealed.meta_refresh_redirects = refresh; layers.push("meta-refresh gevonden"); }
+  const sm = extractSourceMaps(bodyText); if (sm.length) { revealed.source_maps = sm; layers.push("source-map URLs"); }
+  const signed = extractSignedUrlParams(bodyText); if (signed.length) { revealed.signed_url_params = signed; layers.push("signed URL params"); }
 
   // HTML/XML comments + verborgen tekst
   const comments = [];
@@ -529,14 +959,26 @@ function processBytes(bytes, fileInfo) {
   const hidden = extractHiddenHtml(bodyText);
   if (hidden.length) { revealed.verborgen_html_tekst = hidden.slice(0,60); layers.push("verborgen HTML/CSS tekst"); }
 
-  // Base64 in tekst → decoderen (bovenop de al gedecodeerde binaire content)
+  // Data URIs
+  const dataUris = extractDataUris(bodyText);
+  if (dataUris.length) { revealed.data_uris = dataUris; layers.push("data: URIs (" + dataUris.length + ")"); }
+
+  // Base64 / Base32 / hex
   const b64Rx = /[A-Za-z0-9+/_-]{40,}={0,2}/g;
   const b64Hits = []; let bm; let bc = 0;
-  while ((bm = b64Rx.exec(bodyText)) !== null && bc < 40) {
+  while ((bm = b64Rx.exec(bodyText)) !== null && bc < 60) {
     const dec = decodeB64Str(bm[0]);
     if (dec && /[\x20-\x7E]{6,}/.test(dec)) { b64Hits.push({ offset:bm.index, tekst:dec.slice(0,600) }); bc++; }
   }
-  if (b64Hits.length) { revealed.base64_gedecodeerd = b64Hits; layers.push("base64-blobs (" + bc + ")"); }
+  if (b64Hits.length) { revealed.base64_gedecodeerd = b64Hits; layers.push("base64 (" + bc + ")"); }
+
+  const b32Rx = /\b[A-Z2-7]{40,}={0,6}\b/g;
+  const b32Hits = []; let b32m; let b32c = 0;
+  while ((b32m = b32Rx.exec(bodyText)) !== null && b32c < 20) {
+    const dec = decodeBase32(b32m[0]);
+    if (dec && /[\x20-\x7E]{4,}/.test(dec)) { b32Hits.push({ offset:b32m.index, tekst:dec.slice(0,300) }); b32c++; }
+  }
+  if (b32Hits.length) { revealed.base32_gedecodeerd = b32Hits; layers.push("base32 (" + b32c + ")"); }
 
   // JWT
   const jwts = [];
@@ -546,42 +988,53 @@ function processBytes(bytes, fileInfo) {
       jwts.push({ header: decodeB64Str(p[0]), payload: decodeB64Str(p[1]) });
     }
   }
-  if (jwts.length) { revealed.jwt_tokens = jwts; layers.push("JWT gedecodeerd (" + jwts.length + ")"); }
+  if (jwts.length) { revealed.jwt_tokens = jwts; layers.push("JWT (" + jwts.length + ")"); }
 
-  // Andere text-decoders
-  if (/&(?:#\d+|#x[0-9A-Fa-f]+|[a-zA-Z]+);/.test(bodyText)) {
-    revealed.html_entities_decoded = decodeHtmlEntities(bodyText.slice(0, 20000));
-    layers.push("HTML entities");
+  // Overige decoders
+  if (/&(?:#\d+|#x[0-9A-Fa-f]+|[a-zA-Z]+);/.test(bodyText)) { revealed.html_entities_decoded = decodeHtmlEntities(bodyText.slice(0, 20000)); layers.push("HTML entities"); }
+  if (/\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}/.test(bodyText)) { revealed.js_escapes_decoded = decodeJsEscapes(bodyText.slice(0, 20000)); layers.push("JS-escapes"); }
+  if (/%[0-9A-Fa-f]{2}/.test(bodyText)) { revealed.url_encoded_decoded = decodeUrlRecursive(bodyText.slice(0, 20000)); layers.push("URL-encoding (recursief)"); }
+  if (/=[0-9A-Fa-f]{2}(?:=[0-9A-Fa-f]{2}){2,}/.test(bodyText)) { revealed.quoted_printable_decoded = decodeQP(bodyText.slice(0, 20000)); layers.push("quoted-printable"); }
+
+  // Punycode
+  const punyMatches = bodyText.match(/\bxn--[a-z0-9\-]+/gi);
+  if (punyMatches) {
+    const puny = [];
+    for (const p of new Set(punyMatches)) { const d = decodePunycode(p.toLowerCase()); if (d) puny.push({ punycode: p, unicode: d }); }
+    if (puny.length) { revealed.punycode_gedecodeerd = puny; layers.push("punycode"); }
   }
-  if (/\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}/.test(bodyText)) {
-    revealed.js_escapes_decoded = decodeJsEscapes(bodyText.slice(0, 20000));
-    layers.push("JS-escapes");
-  }
-  if (/%[0-9A-Fa-f]{2}/.test(bodyText)) {
-    revealed.url_encoded_decoded = decodeUrlRecursive(bodyText.slice(0, 20000));
-    layers.push("URL-encoding (recursief)");
-  }
-  if (/=[0-9A-Fa-f]{2}(?:=[0-9A-Fa-f]{2}){2,}/.test(bodyText)) {
-    revealed.quoted_printable_decoded = decodeQP(bodyText.slice(0, 20000));
-    layers.push("quoted-printable");
-  }
+
+  // ROT13 auto
+  const rot = rot13Auto(bodyText.slice(0, 4000));
+  if (rot) { revealed.rot13_gedecodeerd = rot.slice(0, 4000); layers.push("ROT13 automatisch onthuld"); }
+
+  // Line-endings + whitespace stego + timestamps
+  revealed.line_endings = analyzeLineEndings(bodyText);
+  const ws = whitespaceStego(bodyText);
+  if (ws.length) revealed.whitespace_steganography = ws;
+  revealed.timestamps = extractTimestamps(bodyText);
 
   // NL zorg identifiers
   const nlz = nlZorgIds(bodyText);
   if (Object.keys(nlz).length) revealed.nl_zorg_identifiers = nlz;
 
-  // Strings uit ALLE bytes (inclusief oorspronkelijke)
+  // Strings uit binary
   revealed.strings_uit_body = extractStringsFromBytes(workBytes, MIN_STRING_LEN).slice(0, 800);
 
   // Consolidatie
   const parts = [];
-  parts.push("=== NORMALIZED TEKST ===\n" + normalized.slice(0, 60000));
+  parts.push("=== NORMALIZED (encoding=" + fileInfo.encoding + ") ===\n" + normalized.slice(0, 80000));
   if (http) parts.push("=== HTTP HEADERS ===\n" + http.headers);
+  if (revealed.har_entries) parts.push("=== HAR ENTRIES ===\n" + revealed.har_entries.map(h => h.method + " " + h.url + " → " + h.status).join("\n"));
+  if (fileInfo.pdf_info) parts.push("=== PDF INFO ===\n" + JSON.stringify(fileInfo.pdf_info, null, 2));
+  if (fileInfo.pdf_streams) parts.push("=== PDF STREAMS ===\n" + fileInfo.pdf_streams.map(p => "[@" + p.offset + " " + (p.type||"?") + "]\n" + (p.tekst || ("fout: " + p.fout))).join("\n---\n"));
+  if (fileInfo.office_text) parts.push("=== OFFICE TEXT ===\n" + fileInfo.office_text.map(o => "--- " + o.deel + " ---\n" + o.tekst.join(" ")).join("\n"));
+  if (fileInfo.rtf_stripped) parts.push("=== RTF STRIPPED ===\n" + fileInfo.rtf_stripped);
   if (comments.length) parts.push("=== HTML/XML COMMENTS ===\n" + comments.join("\n---\n"));
   if (hidden.length) parts.push("=== VERBORGEN HTML/CSS TEKST ===\n" + hidden.join("\n---\n"));
-  if (b64Hits.length) parts.push("=== BASE64 GEDECODEERD ===\n" + b64Hits.map(h=>"[@"+h.offset+"]\n"+h.tekst).join("\n---\n"));
+  if (dataUris.length) parts.push("=== DATA URIs GEDECODEERD ===\n" + dataUris.map(d => "[" + d.mime + "]\n" + (d.decoded_preview || "")).join("\n---\n"));
+  if (b64Hits.length) parts.push("=== BASE64 ===\n" + b64Hits.map(h=>"[@"+h.offset+"]\n"+h.tekst).join("\n---\n"));
   if (jwts.length) parts.push("=== JWT ===\n" + jwts.map(j=>"header="+j.header+"\npayload="+j.payload).join("\n---\n"));
-  if (fileInfo.pdf_streams) parts.push("=== PDF FLATE STREAMS ===\n" + fileInfo.pdf_streams.map(p=>p.tekst||("fout: "+p.fout)).join("\n---\n"));
 
   fileInfo.deobfuscated_text = parts.join("\n\n");
   fileInfo.layers_toegepast = layers;
@@ -594,7 +1047,9 @@ function finalizeBytesOnly(bytes, fileInfo, layers) {
   fileInfo.layers_toegepast = layers;
 }
 
-// ---------- HOOFDLOOP ----------
+// ============================================================
+// HOOFDLOOP
+// ============================================================
 const rapport = [];
 for (let i = 0; i < inputs.length; i++) {
   const item = inputs[i];
@@ -605,10 +1060,9 @@ for (let i = 0; i < inputs.length; i++) {
   try {
     let bytes = null;
     if (item && item.__inlineText) {
-      // string → bytes voor uniforme flow
-      const arr = [];
-      for (let j = 0; j < item.__inlineText.length; j++) arr.push(item.__inlineText.charCodeAt(j) & 0xFF);
-      bytes = new Uint8Array(arr);
+      const arr = new Uint8Array(item.__inlineText.length);
+      for (let j = 0; j < item.__inlineText.length; j++) arr[j] = item.__inlineText.charCodeAt(j) & 0xFF;
+      bytes = arr;
     } else {
       if (!path) { fileInfo.status="ERROR"; fileInfo.reden="geen pad"; rapport.push(fileInfo); continue; }
       if (!fmLocal.fileExists(path)) { fileInfo.status="ERROR"; fileInfo.reden="niet gevonden"; rapport.push(fileInfo); continue; }

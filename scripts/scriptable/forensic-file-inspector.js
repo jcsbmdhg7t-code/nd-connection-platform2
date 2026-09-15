@@ -278,7 +278,11 @@ function detectEncoding(bytes) {
   if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) return { enc:"utf-16be", skip:2 };
   // Heuristiek: als elke tweede byte 0 is, waarschijnlijk UTF-16
   let evenZero = 0, oddZero = 0, sample = Math.min(bytes.length, 200);
-  for (let i = 0; i < sample; i++) if (bytes[i] === 0) { (i % 2 === 0 ? evenZero : oddZero)++; }
+  for (let i = 0; i < sample; i++) {
+    if (bytes[i] === 0) {
+      if (i % 2 === 0) evenZero++; else oddZero++;
+    }
+  }
   if (oddZero > sample * 0.3) return { enc:"utf-16le", skip:0 };
   if (evenZero > sample * 0.3) return { enc:"utf-16be", skip:0 };
   // Windows-1252 heuristiek: veel bytes tussen 0x80-0x9F die geen UTF-8-continuation zijn

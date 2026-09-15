@@ -777,6 +777,159 @@ function extractStringsFromBytes(bytes, minLen) {
   if (cur.length >= minLen) out.push(cur);
   return out;
 }
+// ============================================================
+// CDA-SPECIFIEKE FORENSISCHE HEURISTIEKEN
+// (voortgekomen uit Grothe NB-register; kernidee: hertellingen
+//  van dezelfde diagnose/allergie = re-codering door één actor,
+//  NIET meerdere aandoeningen)
+// ============================================================
+function cdaForensicHeuristics(s) {
+  const out = {};
+
+  // 1. Zelfsluitende data-velden waar comment WEL inhoud heeft
+  //    (allergyN-reaction />, medicationEnd />, severity /> etc.)
+  const selfClose = [];
+  const rx = /<td[^>]+ID="([a-zA-Z]+\d*)(reaction|severity|end|dose)"[^>]*\/>/g;
+  let m;
+  while ((m = rx.exec(s)) !== null && selfClose.length < 60) {
+    selfClose.push({ veld: m[1] + m[2], offset: m.index });
+  }
+  if (selfClose.length) out.zelfsluitende_datavelden_bij_comments = selfClose;
+
+  // 2. Re-codering signaal: hetzelfde allergen >1x per document met verschillende IDs
+  //    → géén 2/3 allergieën, wél 2/3 re-coding events
+  const allergs = {};
+  const arx = /<td\s+ID="allergy(\d+)allergen"[^>]*>([^<]{3,100})</g;
+  let am;
+  while ((am = arx.exec(s)) !== null) {
+    const key = am[2].trim().toLowerCase();
+    if (!allergs[key]) allergs[key] = [];
+    allergs[key].push({ id: "allergy" + am[1], offset: am.index });
+  }
+  const reCoded = Object.entries(allergs).filter(([_, arr]) => arr.length > 1);
+  if (reCoded.length) {
+    out.re_codering_allergieen = reCoded.map(([naam, arr]) => ({
+      allergen: naam,
+      aantal_recoderingen: arr.length,
+      interpretatie: "één werkelijke allergie, " + (arr.length - 1) + " re-codering(en) door actor",
+      ids: arr
+    }));
+  }
+
+  // 3. Placeholder-adressen (huisnummer 999/000, POSTBUS als straat)
+  const placeholders = [];
+  const hn = s.match(/<houseNumber>(999|000|9999)<\/houseNumber>/gi);
+  if (hn) placeholders.push({ soort: "placeholder-huisnummer", waarden: hn });
+  const straat = s.match(/<streetName>\s*(POSTBUS|Postbus)[^<]*<\/streetName>/gi);
+  if (straat) placeholders.push({ soort: "postbus-als-straat", waarden: straat });
+  if (placeholders.length) out.placeholder_adressen = placeholders;
+
+  // 4. Legacy-VARCHAR truncatie: streetName eindigt op precies 10, 20 of 30 chars
+  //    zonder eind-spatie, of duidelijk afgekapt (KAMPERSNGL vs Kampersingel)
+  const streetnames = [...(s.matchAll(/<streetName>\s*([^<]+?)\s*<\/streetName>/g))].map(m => m[1]);
+  const suspTrunc = [];
+  const seen = new Set();
+  for (const sn of streetnames) {
+    if (!sn) continue;
+    if ([10, 20, 30].includes(sn.length) && !/[aeiouy]$/i.test(sn)) {
+      if (!seen.has(sn)) { seen.add(sn); suspTrunc.push({ waarde: sn, lengte: sn.length, reden: "eindigt op ronde legacy VARCHAR-grens zonder klinker" }); }
+    }
+    // Detecteer wetteke verkorting: alle-hoofdletters (KAMPERSNGL, PRINSEN BOLWERK)
+    if (sn === sn.toUpperCase() && sn.length > 5 && !seen.has(sn)) {
+      seen.add(sn); suspTrunc.push({ waarde: sn, lengte: sn.length, reden: "all-caps in mixed-case document (legacy AS400/mainframe artefact)" });
+    }
+  }
+  if (suspTrunc.length) out.legacy_truncatie_verdacht = suspTrunc;
+
+  // 5. Postcode zonder-spatie ZIB-schending
+  const pc = s.match(/<postalCode>\d{4}\s+[A-Z]{2}<\/postalCode>/g);
+  if (pc) {
+    out.postcode_zib_schending = {
+      aantal: pc.length,
+      voorbeelden: Array.from(new Set(pc)).slice(0, 10),
+      norm: "ZIB Adresgegevens v3.2 eist 4 cijfers + 2 letters ZONDER spatie"
+    };
+  }
+
+  // 6. Versienummer-explosie
+  const versies = [...(s.matchAll(/<versionNumber\s+value="(\d+)"/g))].map(m => parseInt(m[1], 10));
+  if (versies.length) {
+    const hoogste = Math.max(...versies);
+    if (hoogste >= 20) {
+      out.versienummer_explosie = {
+        hoogste: hoogste,
+        alle: Array.from(new Set(versies)).sort((a,b) => a - b),
+        interpretatie: "versienummer >= 20 op één ClinicalDocument = intensieve nabewerking"
+      };
+    }
+  }
+
+  // 7. Batch-mutatie: >=3 effectiveTime-values binnen 15 minuten
+  const times = [...(s.matchAll(/<effectiveTime\s+value="(\d{14})/g))].map(m => m[1]);
+  if (times.length >= 3) {
+    const parsed = times.map(t => {
+      const dt = new Date(Date.UTC(
+        +t.substr(0,4), +t.substr(4,2)-1, +t.substr(6,2),
+        +t.substr(8,2), +t.substr(10,2), +t.substr(12,2)
+      ));
+      return { raw: t, ms: dt.getTime() };
+    }).sort((a,b) => a.ms - b.ms);
+    const clusters = [];
+    let cur = [parsed[0]];
+    for (let i = 1; i < parsed.length; i++) {
+      if (parsed[i].ms - cur[cur.length-1].ms <= 15 * 60 * 1000) cur.push(parsed[i]);
+      else { if (cur.length >= 3) clusters.push(cur); cur = [parsed[i]]; }
+    }
+    if (cur.length >= 3) clusters.push(cur);
+    if (clusters.length) {
+      out.batch_mutatie_clusters = clusters.map(c => ({
+        aantal: c.length,
+        van: c[0].raw,
+        tot: c[c.length-1].raw,
+        span_seconden: Math.round((c[c.length-1].ms - c[0].ms) / 1000),
+        interpretatie: "meerdere records gemuteerd binnen 15 min door één actor"
+      }));
+    }
+  }
+
+  // 8. Ontbrekende gestructureerde reactie bij gedocumenteerde allergie-comment
+  const commentedNoReaction = [];
+  const crx = /<td\s+ID="allergy(\d+)reaction"[^>]*\/>[\s\S]{0,500}<td\s+ID="allergy\1comments"[^>]*>[\s\S]{0,50}<paragraph>([^<]{3,300})/g;
+  let cm;
+  while ((cm = crx.exec(s)) !== null && commentedNoReaction.length < 20) {
+    commentedNoReaction.push({
+      allergy_id: "allergy" + cm[1],
+      comment_bevat: cm[2].trim().slice(0, 150),
+      interpretatie: "reactie-veld self-closing terwijl comment reactie beschrijft — voor triage-systemen ONZICHTBAAR"
+    });
+  }
+  if (commentedNoReaction.length) out.reactie_leeg_maar_comment_beschrijft = commentedNoReaction;
+
+  // 9. Chain-of-custody indicatoren (bewerkte export)
+  const custody = [];
+  if (/http:\/\/localhost/i.test(s)) custody.push("localhost-URL in productie-CDA");
+  if (/sodipodi|inkscape/i.test(s)) custody.push("Inkscape/Sodipodi SVG-editor metadata");
+  if (/textastic/i.test(s)) custody.push("Textastic (iOS-editor) preview-URL");
+  if (/claude\.ai|anthropic/i.test(s)) custody.push("Claude/Anthropic-referentie");
+  if (custody.length) out.chain_of_custody_signalen = {
+    signalen: custody,
+    interpretatie: "dit CDA is een bewerkt derivaat, niet het bron-Epic-XML → bewijswaarde M, niet H"
+  };
+
+  // 10. Naam-varianten voor patiënt (identity-fragmentatie)
+  const patNames = [...(s.matchAll(/<name>(GROTHE[^<]{0,40})<\/name>/g))].map(m => m[1]);
+  const uniqPat = Array.from(new Set(patNames));
+  if (uniqPat.length > 1) {
+    out.patient_naam_varianten = {
+      aantal: uniqPat.length,
+      varianten: uniqPat,
+      risico: "cross-systeem identity-matching (LSP/Mitz/MedMij) kan falen bij mismatch"
+    };
+  }
+
+  return out;
+}
+
 function nlZorgIds(s) {
   const out = {};
   const bsn = (s.match(/\b\d{9}\b/g) || []).filter(n => {
@@ -793,7 +946,15 @@ function nlZorgIds(s) {
   const cda = s.match(/<ClinicalDocument[^>]*/gi); if (cda) out.hl7_cda = cda.slice(0,5);
   const fhir = s.match(/"resourceType"\s*:\s*"[A-Z][A-Za-z]+"/g); if (fhir) out.fhir_resources = Array.from(new Set(fhir)).slice(0,50);
   const xdm = s.match(/METADATA\.XML|IHE_XDM|SUBSET\d+/gi); if (xdm) out.ihe_xdm = Array.from(new Set(xdm));
-  const ipv4 = s.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g); if (ipv4) out.ipv4 = Array.from(new Set(ipv4)).slice(0,30);
+  // IPv4 — sluit OIDs uit: valide oktet is 0-255; matches binnen HL7-OID string vermijden
+  const ipv4Cand = s.match(/(?<![.\d])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![.\d])/g) || [];
+  const ipv4 = ipv4Cand.filter(ip => {
+    const parts = ip.split(".").map(Number);
+    if (parts.some(p => p > 255)) return false;
+    if (parts[0] === 2 && parts[1] === 16 && parts[2] === 840) return false; // HL7-OID prefix
+    return true;
+  });
+  if (ipv4.length) out.ipv4 = Array.from(new Set(ipv4)).slice(0,30);
   const uuids = s.match(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g); if (uuids) out.uuids = Array.from(new Set(uuids)).slice(0,50);
   return out;
 }
@@ -1021,6 +1182,15 @@ function processBytes(bytes, fileInfo) {
   // NL zorg identifiers
   const nlz = nlZorgIds(bodyText);
   if (Object.keys(nlz).length) revealed.nl_zorg_identifiers = nlz;
+
+  // CDA-specifieke forensische heuristieken (Grothe-domein)
+  if (/<ClinicalDocument|urn:hl7-org:v3/i.test(bodyText)) {
+    const cda = cdaForensicHeuristics(bodyText);
+    if (Object.keys(cda).length) {
+      revealed.cda_forensische_heuristieken = cda;
+      layers.push("CDA forensische heuristieken toegepast");
+    }
+  }
 
   // Strings uit binary
   revealed.strings_uit_body = extractStringsFromBytes(workBytes, MIN_STRING_LEN).slice(0, 800);

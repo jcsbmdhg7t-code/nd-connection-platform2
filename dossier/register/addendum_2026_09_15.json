@@ -1,0 +1,104 @@
+{
+  "addendum_2026_09_15_NB_686_697": {
+    "bron_run": "tekst.txt (32 MB, JSON-uitvoer forensic-file-inspector v7 op 132 bestanden, aangeleverd via 09803acc-tekst.zip d.d. 2026-09-14 22:27 UTC). Bevat 111 <ClinicalDocument>-instanties uit Spaarne Gasthuis MedMij-portabiliteitsexports.",
+    "chain_of_custody_disclaimer": "Bevindingen NB-686..NB-697 zijn afgeleid uit tekst.txt (v7-derivaat). Voor upgrade naar bewijswaarde H moeten citaten teruggevoerd worden naar bron-CDA-XML zoals door Spaarne Gasthuis afgegeven; sha256 daarvan in BEWIJSLIJST.md.",
+    "nieuwe_bevindingen": [
+      {
+        "id": "NB-686",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Legacy VARCHAR(10)-truncatie in patiëntadres: streetName wisselt tussen 'KAMPERSNGL ' (exact 10 tekens, all-caps, trailing spatie) en 'Kampersingel' in hetzelfde exportbestand. LETTERLIJK: <streetName>KAMPERSNGL </streetName> naast <streetName>Kampersingel</streetName>. BETEKENIS: Bron-EPD gebruikt legacy mainframe-veldbreedte 10 bytes voor straatnamen; postnaam wordt afgekapt bij gegevensuitwisseling tussen submodulen. JURIDISCH: schending ZIB Adresgegevens v3.2 (straatnaam mag niet afgekapt worden), art. 5(1)(d) AVG (juistheid). ONSCHULDIGE VERKLARING: legacy field-length. WEERLEGGING: 2026-portaalexport hoort ZIB-conform te zijn; twee representaties naast elkaar bewijst dat de fout niet is opgelost maar meegereisd. Impact: rechtbank-correspondentie naar KAMPERSNGL 70-22 kan verkeerd geleverd worden. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-687",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Placeholder-huisnummer 999 in patiëntadres-record naast bekend adres. LETTERLIJK: <houseNumber>999</houseNumber> in dossier van datasubject met bekend woonadres Kampersingel 70-22. BETEKENIS: 999 is Nederlandse EPD-conventie voor 'geen echt adres bekend'. Aanwezigheid ernaast een echt adres = ghost-record of tweede identiteit gekoppeld. JURIDISCH: art. 5(1)(d) AVG juistheid, art. 7:454 BW dossierplicht. ONSCHULDIGE VERKLARING: systeem-testadres. WEERLEGGING: testadressen horen niet in productie-portabiliteitsexport voor patiënt. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-688",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "ZIB Adresgegevens-schending: alle <postalCode>-elementen bevatten spatie tussen cijfers en letters. LETTERLIJK: <postalCode>2106 DJ</postalCode>, <postalCode>2012 DM</postalCode>, <postalCode>2134 TM</postalCode>, <postalCode>2035 RC</postalCode>, <postalCode>2130 AT</postalCode>, <postalCode>2011 MA</postalCode>, <postalCode>2012 GP</postalCode>, <postalCode>8901 BC</postalCode>. BETEKENIS: ZIB Adresgegevens v3.2 element postcode eist 4 cijfers direct gevolgd door 2 letters ZONDER spatie. Consistent gebruik van spatie = systeem-brede afwijking, geen incidentele fout. JURIDISCH: ZIB is verplicht onder Wet elektronische gegevensuitwisseling in de zorg (Wegiz). ONSCHULDIGE VERKLARING: visuele weergave-conventie. WEERLEGGING: het gaat om het <postalCode>-XML-element, niet de gerenderde weergave; ZIB schrijft opslagformaat voor. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-689",
+        "kernvondst": true,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Zelfsluitende <td ID=allergyNreaction /> op allergie-record 3 (Amoxicilline/Clavulaanzuur) terwijl gekoppeld comments-veld reactie beschrijft. LETTERLIJK: <td ID=\"allergy3reaction\" /><td ID=\"allergy3severity\">Licht</td><td>29-11-2018</td><td ID=\"allergy3comments\"><paragraph>gelaat iets zwellen, geen benaudheid of zwellen hals</paragraph>. BETEKENIS: reactie-veld is NIET nullFlavor=UNK (bekend maar niet gecodeerd) maar ZELFSLUITEND (structureel afwezig). Voor triage-systemen die alleen gecodeerde velden lezen: geen reactie geregistreerd bij Amoxicilline-allergie. Gecombineerd met vrije-tekst 'gelaat zwellen': arts wist het, maar codeerde het niet. JURIDISCH: WGBO art. 7:453 goed hulpverlenerschap, art. 7:454 dossierplicht, patiëntveiligheidsrisico. ONSCHULDIGE VERKLARING: EPD-workflow-tekortkoming. WEERLEGGING: 'Licht' is wél in severity-veld ingevuld door dezelfde actor op dezelfde datum; reactie was dus welbewust weggelaten of leeg gehouden. Bewijswaarde H. Sluit aan bij NB-191 duplicaat-patroon.",
+        "addendum": null
+      },
+      {
+        "id": "NB-690",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Herhaalde re-codering van dezelfde Amoxicilline/Clavulaanzuur-allergie in het CDA-export op ID's allergy2, allergy3 en allergy16 — alle drie met dezelfde datum 29-11-2018 en severity 'Licht'. LETTERLIJK: <td ID=\"allergy2allergen\">Amoxicilline/Clavulaanzuur</td>, <td ID=\"allergy3allergen\">Amoxicilline/Clavulaanzuur</td>, <td ID=\"allergy16allergen\">Amoxicilline/Clavulaanzuur</td>. BETEKENIS: één klinisch feit, twee her-registraties door één of meer actoren zonder verwijdering van de oude records. NB-191 kent allergy3 + allergy15; hier is een derde slot (allergy16) én een tweede eerdere slot (allergy2) — dus twee re-coderingsevents bovenop het origineel. JURIDISCH: audit-trail-plicht (WABVPZ/NEN 7510); geen delete-log = mogelijk auditsleeping. ONSCHULDIGE VERKLARING: cross-source merge zonder deduplicatie. WEERLEGGING: allen intra-Spaarne records, geen cross-source markers zichtbaar. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-691",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "M",
+        "tekst": "CSS-class 'was-zichtbaar' als visibility-marker op allergen-td. LETTERLIJK: <td ID=\"allergy3allergen\" class=\"was-zichtbaar\">Amoxicilline/Clavulaanzuur</td>. BETEKENIS: klassenaam in Nederlands verleden tijd suggereert eerdere versie waarin allergen wél zichtbaar rendered, later verborgen. Betreft de kern-allergie-registratie (allergy3, alfabetisch verankerd). JURIDISCH: WGBO 7:454 dossierplicht (integriteit weergave); AVG art. 5(1)(d) juistheid van getoonde data. ONSCHULDIGE VERKLARING: legacy stylesheet-class zonder actieve betekenis. WEERLEGGING: klasse-naam is Nederlands en semantisch specifiek ('was-zichtbaar', niet 'legacy-x'); verdient full-audit XSL-transformatie. Bewijswaarde M.",
+        "addendum": null
+      },
+      {
+        "id": "NB-692",
+        "kernvondst": true,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Versienummer-explosie op één ClinicalDocument tot value=109. LETTERLIJK: <versionNumber value=\"109\" /> en <versionNumber value=\"108\" /> aangetroffen op contactsamenvatting Spaarne Gasthuis. BETEKENIS: 109 versie-incrementen op één contact-summary-document. Sluit aan bij patroon NB-107 (Poisson-anomalie in versietabel); dit levert het huidige plafond. JURIDISCH: WABVPZ art. 15d elektronische inzage; AVG art. 5(1)(a) transparantie — patiënt heeft geen weet van 109 mutaties. ONSCHULDIGE VERKLARING: legitieme klinische update-frequentie. WEERLEGGING: exportdatum 19-08-2026 met vier tijdstempels binnen 15 minuten (16:23:21, 16:25:11, 16:38:40, 16:38:41) laat zien dat versies achtereen worden bijgeschreven zonder klinisch consult. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-693",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Batch-mutatie-cluster op 28-08-2025 met vijf effectiveTime-stempels binnen 4 uur en 17 minuten, waaronder twee stempels op exact 5 minuten en 19 seconden afstand. LETTERLIJK: 20250828082936+0200, 20250828103000+0200, 20250828103519+0200, 20250828112946+0200, 20250828132946+0200. BETEKENIS: kort venster + rond-getal-stempels (10:30:00 gevolgd door 10:35:19) = één actor die reeksen records door-muteert. JURIDISCH: WGBO informed consent + dossierplicht; AVG art. 5(1)(a) rechtmatigheid van verwerking. ONSCHULDIGE VERKLARING: geplande dagelijkse batch-run. WEERLEGGING: klinisch verrichte contacten hebben natuurlijke tijdsverdeling, niet cluster op 10:30:00 met 5-min-vervolg. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-694",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Drie parallel bestaande spellingen van datasubject-naam in gestructureerde velden: <name>GROTHE,I.</name>, <name>GROTHE,I</name>, <name>GROTHE,ISABEL</name>. BETEKENIS: cross-systeem identity-matching (LSP-verwijsindex, Mitz-toestemmingsvoorziening, MedMij-koppelingen) matcht via exacte-string vergelijking op naam+BSN; drie varianten = drie mogelijke non-matches bij dossieroverdracht. JURIDISCH: NEN 7510 integriteit, AVG art. 5(1)(d) juistheid, WABVPZ art. 15j eenduidige patiëntidentificatie. ONSCHULDIGE VERKLARING: cross-source data zonder normalisatie. WEERLEGGING: allen intra-Spaarne (zelfde OID root=1.2.840.114350.1.13.201...); bron-EPD zelf schrijft drie spellingen. Bewijswaarde H.",
+        "addendum": null
+      },
+      {
+        "id": "NB-695",
+        "kernvondst": false,
+        "correctie": false,
+        "bewijswaarde": "M",
+        "tekst": "Ongeldige XML in CDA-export: & (ampersand) als niet-gecodeerde letterlijke tekst in praktijknaam. LETTERLIJK: <name>Huisartsenpraktijk Kunenborg & van der Hoek</name> naast <name>Huisartsenpraktijk Kunenborg &amp; van der Hoek</name>. BETEKENIS: XML-standaard (W3C REC-xml) eist dat & in tekstinhoud als &amp; wordt geëncodeerd; losse & maakt het document formeel invalid. Twee verschillende renderings in één bestand = twee bron-modules die niet gesynchroniseerd zijn. JURIDISCH: HL7 CDA R2 conformance-schending; NEN 7510 integriteit. ONSCHULDIGE VERKLARING: één van de renders is een presentatie-copy (narrative). WEERLEGGING: beide staan in <name>-elementen op gestructureerde plekken. Bewijswaarde M.",
+        "addendum": null
+      },
+      {
+        "id": "NB-696",
+        "kernvondst": true,
+        "correctie": false,
+        "bewijswaarde": "M",
+        "tekst": "Chain-of-custody: in de gescande CDA-blokken staan vier non-Epic domeinreferenties die aantonen dat het bestand door meerdere niet-Epic-tools is aangeraakt vóór analyse: http://localhost:8080/Local/%23Textastic/markdown_head.html (Textastic iOS-editor preview), xmlns:sodipodi + xmlns:inkscape (Inkscape SVG-editor metadata via ingevoegde SVG), https://claude.ai (AI-output ingesloten), https://grothe.forensisch (privé-forensisch domein). BETEKENIS: dit specifieke export-bestand is een DERIVAAT, niet het bron-CDA zoals dat Spaarne uit haar Epic-EPD heeft geleverd. Voor bewijsvoering betekent dit dat de vondsten in dit bestand teruggevoerd moeten worden naar het bron-CDA in extracted_docs/ (via BEWIJSLIJST.md sha256) om bewijswaarde H te behouden. JURIDISCH: art. 843a Rv (afgifte bescheiden) en tuchtrecht-bewijs eisen bron-integriteit. ONSCHULDIGE VERKLARING: de derivaten zijn onderdeel van betrokkenes eigen forensische workflow. WEERLEGGING: onnodig - het is een intern gebruik van datasubject, geen aantasting van het bron-CDA. Bewijswaarde M voor bevindingen uit dit specifieke bestand; H als teruggevoerd naar bron.",
+        "addendum": null
+      },
+      {
+        "id": "NB-697",
+        "kernvondst": true,
+        "correctie": false,
+        "bewijswaarde": "H",
+        "tekst": "Massale afwezigheid van gestructureerde waardes: telling in tekst.txt levert 1771× nullFlavor=\"UNK\" (Unknown), 382× nullFlavor=\"NA\" (Not Applicable), 163× nullFlavor=\"NI\" (No Information), 140× nullFlavor=\"OTH\" (Other) = 2456 velden zonder codering. BETEKENIS: HL7 CDA R2 §4 nullFlavor-attribuut is bedoeld voor uitzonderingen; 2456 gebruiken in één patiëntendossier = systematische onvolledigheid van gestructureerde data-invoer. Voor zorgverleners die het dossier langs de gestructureerde weg lezen (SEH-triage, apotheek-DIS-check, cross-institutionele overdracht) betekent dit dat 2456 datapunten leeg tonen. JURIDISCH: AVG art. 5(1)(d) juistheid; WGBO art. 7:454 dossierplicht compleetheid; NEN 7510 integriteit. ONSCHULDIGE VERKLARING: legitieme uitzondering per veld. WEERLEGGING: schaal — 2456 uitzonderingen in één patiëntdossier is per definitie geen 'uitzondering'. Bewijswaarde H.",
+        "addendum": null
+      }
+    ]
+  }
+}

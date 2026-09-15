@@ -136,4 +136,4 @@ dist
 .pnp.*
 
 # Replit debugger
-.breakpoints
+.breakpointsdossier/register/
